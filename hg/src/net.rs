@@ -28,6 +28,11 @@ pub enum Ev {
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+/// A connection id for something that is not a socket (the bots).
+pub fn new_conn_id() -> u64 {
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 fn frame_ok(f: &[u8]) -> bool {
     f.len() >= proto::HEADER && f.len() - proto::HEADER <= MSGBUFFERSIZE
 }

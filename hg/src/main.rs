@@ -1,6 +1,7 @@
 //! Helbreath game server ("HG"), ported from the C++ `HG` project. See PORTING.md.
 //!
 //! usage: hg [--dir SERVERDIR] [--bind ADDR] [--ws-port N] [--no-tcp] [--login HOST:PORT] [--local-ip IP] [--seed N]
+//!           [--bots N --bots-login HOST:PORT] [--bots-cfg FILE] [--bots-sample]   (Rust only bots: see bots.rs, Bots.cfg)
 //!
 //! Runs from SERVERDIR (a folder like run/server/Maps/All: GServer.cfg, Settings.cfg, MAPDATA/, GameData/, and
 //! ../configs/droplist.xml). Clients connect with plain TCP on game-server-port and, with --ws-port, WebSocket
@@ -11,6 +12,7 @@
 #![allow(dead_code)]
 #[path = "../../login/src/util.rs"]
 mod util;
+mod bots;
 mod chat;
 mod combat;
 mod delay;
@@ -98,6 +100,10 @@ fn arg(args: &[String], k: &str) -> Option<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--bots-sample") {
+        print!("{}", bots::CFG_SAMPLE);
+        return;
+    }
     if let Some(d) = arg(&args, "--dir") {
         if let Err(e) = std::env::set_current_dir(&d) {
             eprintln!("cannot enter {d}: {e}");
@@ -165,7 +171,37 @@ fn main() {
             }
         });
         log(&format!("(*) Login (gate) server at {login}"));
+        // Rust only (bots.rs): Bots.cfg, overridden by --bots N --bots-login HOST:PORT --bots-cfg FILE
+        let cfg_path = arg(&args, "--bots-cfg").unwrap_or_else(|| "Bots.cfg".into());
+        let mut bcfg = match std::fs::read_to_string(&cfg_path) {
+            Ok(t) => {
+                let (c, warnings) = bots::BotCfg::parse(&t);
+                for w in warnings {
+                    log(&format!("(!) {cfg_path}: {w}"));
+                }
+                c
+            }
+            Err(_) => bots::BotCfg::default(),
+        };
+        if let Some(n) = arg(&args, "--bots").and_then(|s| s.parse().ok()) {
+            bcfg.count = n;
+        }
+        if let Some(l) = arg(&args, "--bots-login") {
+            bcfg.login = l;
+        }
+        if bcfg.count > 0 && bcfg.login.is_empty() {
+            log("(!!!) bots need bot-login-address in Bots.cfg or --bots-login HOST:PORT (the Login's client port)");
+            std::process::exit(1);
+        }
+        let bots = bots::Bots::new(bcfg);
+        for (i, b) in bots.list.iter().enumerate() {
+            tokio::spawn(bots::run_bot(i, bots.cfg.clone(), b.acc.clone(), b.ch.clone(), tx.clone()));
+        }
+        if !bots.list.is_empty() {
+            log(&format!("(*) {} bots from {cfg_path}", bots.list.len()));
+        }
         let mut g = game::Game::new(cfg, settings, maps, tx, login, seed);
+        g.bots = bots;
         // timeSetEvent(TICKDELAY, TIME_PERIODIC) -> WM_USER_TIMERSIGNAL -> OnTimer
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(consts::TICKDELAY as u64));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

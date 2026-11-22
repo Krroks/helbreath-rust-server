@@ -133,6 +133,8 @@ pub struct Game {
     pub fish: Vec<Option<crate::skills::Fish>>,
     /// time-based reseeds of rand() (`srand(time(NULL))` every 3 minutes) unless a fixed seed was given
     reseed: bool,
+    /// Rust only: the in-process bots (bots.rs)
+    pub bots: crate::bots::Bots,
 }
 
 /// `iGetLevelExp`, with the C++ int arithmetic (it wraps above level ~880).
@@ -247,6 +249,7 @@ impl Game {
             minerals: (0..MAXMINERALS).map(|_| None).collect(),
             fish: (0..MAXFISHS).map(|_| None).collect(),
             reseed: seed.is_none(),
+            bots: Default::default(),
         };
         let now = g.now();
         (g.t1, g.t2, g.t3, g.t4, g.t5, g.t6, g.fish_time, g.whether_time, g.sector_time) = (now, now, now, now, now, now, now, now, now);
@@ -372,6 +375,7 @@ impl Game {
             self.t1 = now;
         }
         self.msg_process();
+        self.bots_process();
         if now.wrapping_sub(self.t2) > 3000 {
             self.check_client_response_time();
             self.send_alive();
@@ -380,6 +384,7 @@ impl Game {
             if !self.game_started && self.data.all_ok() && self.ls_active_count == MAXSUBLOGSOCK {
                 self.on_start_game_signal();
                 self.game_started = true;
+                crate::bots::READY.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
         if now.wrapping_sub(self.t6) > 1000 {

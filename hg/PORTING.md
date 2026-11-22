@@ -1191,3 +1191,42 @@ Regressions (Rust login + Rust HG, after this change): play 22/22, fight 23/23, 
    GetDKItemHandler should check the level cap.
 7. (done, kept) The owner's decision on the batch E leftovers (the list above): the signed contribution check of the hero items, and the empty reward
    gold request.
+
+## Rust only: in-process bots (2026-11-22, `bots.rs`, `Bots.cfg`)
+
+No C++ counterpart. Off unless `Bots.cfg` (next to `Settings.cfg`; `hg --bots-sample` prints the documented sample, every key
+with its default) has `bot-count` > 0, or `hg --bots N --bots-login HOST:PORT [--bots-cfg FILE]` says so (the Login's client TCP
+port, `login --tcp-port`). A task per bot creates the account `<prefix>NN` and character if missing (through the Login), does the
+ENTERGAME, and hands the game a fake connection through `Ev::Accept` / `Ev::Read` (its "IP" is `bot-N`: bAccept allows 2
+connections per IP). The brain (`Game::bots_process`, after `msg_process`) reads the world directly and acts by pushing the frames a
+client would send into `Game::queue`, so every handler and anti-hack check applies to a bot as to a player (`step-ms` / `attack-ms`
+cannot go under the speed-hack limits of `motion_move` / `motion_attack`: 150 / 220 ms).
+
+Behaviour (modes `Hunt`, `Rest`, `Travel`):
+- equips the best weapon and fills empty armour slots from the bag (the server's refusals are not retried);
+- A* (`find_path`) to the nearest hostile monster within `sight`, combat mode on, hits until it dies; gives a target up after
+  `giveup-hits` hits that leave it above `giveup-percent` HP (2 minutes); wanders within `wander-radius` of its home tile;
+- below `potion-percent` HP drinks a red potion (any `ITEMEFFECTTYPE_HP` item); with none left and below `recall-percent` reads a
+  recall scroll; below `tired-percent` it only fights what is within 2 tiles;
+- away from its home map (recall, death restart): `Rest` until `rest-percent` HP, then `Travel`: BFS over the `teleport-loc` links
+  of the maps this server runs, A* to the teleport tile, `REQUEST_TELEPORT`, and so on until home (`auto-return`); a route that needs
+  another game server is not followed ("no teleport route" in the log);
+- `REQUEST_RESTART` after dying; a status line per bot every `status-log-ms`.
+- loot (`loot`, `loot-radius`): between two fights it walks to the closest tile with items and sends the get-item command until the
+  tile is empty (a tile it cannot clear in 4 tries or reach is left alone for 2 minutes);
+- shopping (`shop`, `shop-*`, `sell-loot`): with fewer than `shop-potion-min` potions / `shop-scroll-min` recall scrolls (or `shop-bag-slots`
+  items in the bag) and gold plus loot value for at least one potion, it goes to the nearest `gshop*` map through the teleport tiles
+  (`is_on_shop` is set by the map name), sells the loot (shop category 11-50: `COMMONTYPE_REQ_SELLITEMCONFIRM`, one item per
+  `0.6 s`), buys potions and scrolls up to the targets (`COMMONTYPE_REQ_PURCHASEITEM`), then `Travel`s home; a trip is not
+  repeated before `shop-cooldown-ms`, and one that lasts 3 minutes is dropped.
+Not yet: spells, fleeing on foot, selling unused weapons and armour, repairs, parties, PvP.
+
+Test (isolated Login on other ports + a copy of `Maps/All`, same MySQL): `login --tcp-port 4100 --ws-port 4102 --gs-port 5757
+--no-db-maintenance`, `hg --login 127.0.0.1:5757` with a `Bots.cfg` (`bot-count = 1`, `bot-login-address = 127.0.0.1:4100`) and a
+`GServer.cfg` with another `game-server-port`; run once to create the character, stop, then `UPDATE char_database SET
+MapLoc='aresden', LocX=115, LocY=58, Level=30, Exp=31209, HP=60 ...` and run again. Seen: Dagger equipped, potions drunk at 60/170,
+slimes in 2 hits, a death by a scorpion -> restart in `default` -> Travel through `arefarm` back to aresden -> hunting again.
+Shop run (scratch `Settings.cfg` with `primary-drop-rate = 8000` so that monsters drop things, `shop-potion-min = 4`,
+`shop-cooldown-ms = 20000`): gold and potions picked up, trip to `gshop_1`, 8 red potions bought for 40 gold, back home and hunting;
+with `shop-bag-slots = 20` a second trip sold the loot (+76 gold) and bought a recall scroll.
+Remove the rows afterwards (`char_database`, `item`, `bank_item`, `skill`, `account_database` for the bot names).
