@@ -12,13 +12,13 @@
 //! `Rest` (away from its home map: wait until healed) and `Travel` (back to the home tile, through the teleport
 //! tiles of the maps this server runs), `Shop` (a trip to a `gshop*` map to sell the loot and buy potions and scrolls).
 //! Gear: it equips what it carries (the best weapon, empty armour slots). Between two fights it picks up what lies about.
-use crate::client::Item;
+use crate::client::{Client, Item};
 use crate::consts::*;
 use crate::game::{From as Src, Game, Msg, MAXCLIENTS_};
 use crate::item_use::{ITEMTYPE_EAT, ITEMTYPE_USE_DEPLETE};
 use crate::log::log;
 use crate::map::OWNERTYPE_NPC;
-use crate::shop::sell_price;
+use crate::shop::{repair_price, sell_price};
 use crate::net::{self, Ev};
 use crate::util::{Rd, W};
 use std::cmp::Reverse;
@@ -81,6 +81,8 @@ pub struct BotCfg {
     pub shop_cooldown_ms: u32,
     pub shop_potion_item: String,
     pub shop_scroll_item: String,
+    pub repair: bool,
+    pub repair_pct: i32,
 }
 
 impl Default for BotCfg {
@@ -122,6 +124,8 @@ impl Default for BotCfg {
             shop_cooldown_ms: 120_000,
             shop_potion_item: "RedPotion".into(),
             shop_scroll_item: "RecallScroll".into(),
+            repair: true,
+            repair_pct: 30,
         }
     }
 }
@@ -166,6 +170,8 @@ shop-bag-slots       = 40         // a trip also when the bag holds this many it
 shop-cooldown-ms     = 120000     // least time between two trips
 shop-potion-item     = RedPotion  // what it buys as a potion
 shop-scroll-item     = RecallScroll
+repair               = 1          // repairs worn gear at the shop (only characters of a nation wear it out; neutral ones do not)
+repair-percent       = 30         // a trip when a worn piece is below this % of its endurance (or broke) and it can pay
 ";
 
 impl BotCfg {
@@ -214,6 +220,8 @@ impl BotCfg {
                 ("shop-scroll-target", Some(x)) => c.shop_scroll_target = x.clamp(0, 100) as u32,
                 ("shop-bag-slots", Some(x)) => c.shop_bag_slots = x.clamp(1, 50) as usize,
                 ("shop-cooldown-ms", Some(x)) => c.shop_cooldown_ms = x.max(0) as u32,
+                ("repair-percent", Some(x)) => c.repair_pct = x.clamp(1, 99) as i32,
+                ("repair", _) if flag.is_some() => c.repair = flag.unwrap(),
                 ("loot", _) if flag.is_some() => c.loot = flag.unwrap(),
                 ("shop", _) if flag.is_some() => c.shop = flag.unwrap(),
                 ("sell-loot", _) if flag.is_some() => c.sell_loot = flag.unwrap(),
@@ -286,6 +294,7 @@ pub struct Bot {
     last_trade: u32,
     last_shop: u32,
     sell_tried: Vec<(usize, u32)>,
+    repair_tried: Vec<usize>,
     buy_fails: u32,
     last_have: u32,
     /// items on the ground: the tile it is going to, tries there, tiles to leave alone until a time
@@ -500,13 +509,55 @@ fn is_recall_scroll(it: &Item) -> bool {
 /// What the shops buy from a bot without it missing it: shop category 11-50 (jelly, hides ...), not the supplies
 /// it uses, not gold.
 fn is_loot(it: &Item) -> bool {
-    it.count > 0 && (11..=50).contains(&it.cfg.category) && !is_potion(it) && !is_recall_scroll(it) && it.cfg.name.get(..4) != Some(b"Gold")
+    it.count > 0 && it.cfg.item_type != 1 && (11..=50).contains(&it.cfg.category) && !is_potion(it) && !is_recall_scroll(it) && it.cfg.name.get(..4) != Some(b"Gold")
 }
 
-/// Average damage of a weapon (dice thrown x (range + 1) / 2 + bonus, the small-target values).
+/// Gear (item type 1, shop category 1-50: weapons, armour, cloaks, necklaces) it will never wear: a weapon no better than
+/// the one in hand, a piece for a slot already filled, one for a slot it never fills (it only wears head, body, arms,
+/// legs and a shield) or one the server refused to equip. Gear for an empty slot stays: `bot_equip` will put it on.
+/// A broken piece (0 endurance) is not surplus: the shop repairs it.
+fn is_surplus(c: &Client, k: usize, it: &Item, tried: &[usize]) -> bool {
+    let pos = it.cfg.equip_pos;
+    let eq = |p: i32| c.equip_status.get(p as usize).copied().unwrap_or(-1);
+    if it.count == 0 || it.cfg.item_type != 1 || !(1..=50).contains(&it.cfg.category) || it.cur_life_span == 0 || eq(pos) == k as i16 {
+        return false;
+    }
+    if tried.contains(&k) {
+        return true;
+    }
+    match pos {
+        EQUIPPOS_RHAND | EQUIPPOS_TWOHAND => {
+            let worn = [EQUIPPOS_RHAND, EQUIPPOS_TWOHAND].iter().filter_map(|&p| usize::try_from(eq(p)).ok().and_then(|j| c.items.get(j)?.as_ref()).map(weapon_score)).max();
+            worn.is_some_and(|w| weapon_score(it) <= w)
+        }
+        EQUIPPOS_LHAND => eq(pos) >= 0 || eq(EQUIPPOS_TWOHAND) >= 0,
+        EQUIPPOS_HEAD | EQUIPPOS_BODY | EQUIPPOS_ARMS | EQUIPPOS_LEGGINGS => eq(pos) >= 0,
+        _ => true,
+    }
+}
+
+/// A worn piece (or one that broke while worn) at less than `pct` % of its endurance that the shops repair (category
+/// 1-10 at the blacksmith, 11-13 and 43-50 at the shop; the server only checks that the bot is on a shop map) and it can pay for.
+fn repair_slot(c: &Client, equipped_once: &[usize], done: &[usize], pct: i32, gold: u32) -> Option<usize> {
+    c.items.iter().enumerate().position(|(k, it)| {
+        let Some(it) = it else { return false };
+        let cat = it.cfg.category;
+        let eq = c.equip_status.get(it.cfg.equip_pos as usize).copied().unwrap_or(-1);
+        it.cfg.item_type == 1
+            && ((1..=10).contains(&cat) || (11..=13).contains(&cat) || (43..=50).contains(&cat))
+            && it.max_life_span > 0
+            && (it.cur_life_span as i32) * 100 < pct * it.max_life_span as i32
+            && (eq == k as i16 || (it.cur_life_span == 0 && equipped_once.contains(&k)))
+            && !done.contains(&k)
+            && repair_price(it) <= gold
+    })
+}
+
+/// Twice the average damage of a weapon (dice thrown x (range + 1) + 2 x bonus, the small-target values): doubled so
+/// that a 1d6 (3.5) beats a 1d5 (3) instead of tying with it after an integer division.
 fn weapon_score(it: &Item) -> i32 {
     let v = it.cfg.item_effect_value;
-    v[0] * (v[1] + 1) / 2 + v[2]
+    v[0] * (v[1] + 1) + 2 * v[2]
 }
 
 // ------------------------------------------------------------------ brain
@@ -821,7 +872,9 @@ impl Game {
         let (pos, m) = at;
         let (potions, scrolls) = (self.bot_count(h, is_potion), self.bot_count(h, is_recall_scroll));
         let bag = self.clients[h].as_ref().map_or(0, |c| c.items.iter().flatten().count());
-        let low = (cfg.use_potions && potions < cfg.shop_potion_min) || (cfg.use_recall && scrolls < cfg.shop_scroll_min);
+        let gold = self.item_count(h, b"Gold").1;
+        let worn = cfg.repair && self.clients[h].as_ref().is_some_and(|c| repair_slot(c, &b.equip_tried, &[], cfg.repair_pct, gold).is_some());
+        let low = (cfg.use_potions && potions < cfg.shop_potion_min) || (cfg.use_recall && scrolls < cfg.shop_scroll_min) || worn;
         let full = cfg.sell_loot && bag >= cfg.shop_bag_slots;
         if !low && !full {
             return false;
@@ -829,7 +882,7 @@ impl Game {
         let neutral = self.clients[h].as_ref().is_some_and(|c| c.is_neutral());
         let mut wealth = self.item_count(h, b"Gold").1 as i64;
         if cfg.sell_loot {
-            wealth += self.clients[h].as_ref().map_or(0, |c| c.items.iter().flatten().filter(|i| is_loot(i)).map(|i| sell_price(i, i.count as i32, neutral).unwrap_or(0) as i64).sum::<i64>());
+            wealth += self.clients[h].as_ref().map_or(0, |c| c.items.iter().enumerate().filter_map(|(k, i)| i.as_ref().filter(|i| is_loot(i) || is_surplus(c, k, i, &b.equip_tried))).map(|i| sell_price(i, i.count as i32, neutral).unwrap_or(0) as i64).sum::<i64>());
         }
         let cheapest = self.data.item_by_name(cfg.shop_potion_item.as_bytes()).map_or(30, |i| i.price as i64);
         b.last_shop = now; // whatever happens below, the next look is after the cool-down
@@ -843,7 +896,7 @@ impl Game {
         };
         log(&format!("(bot) {}: shopping trip to {} ({potions} potions, {scrolls} scrolls, {bag} items, ~{wealth} gold)", b.ch, String::from_utf8_lossy(&self.maps[shop].name)));
         (b.mode, b.shop_map, b.shop_start, b.buy_fails, b.last_have, b.target) = (Mode::Shop, shop, now, 0, 0, 0);
-        b.sell_tried.clear();
+        (b.sell_tried, b.repair_tried) = (Vec::new(), Vec::new());
         b.path.clear();
         true
     }
@@ -870,11 +923,12 @@ impl Game {
         }
         if cfg.sell_loot {
             let c = self.clients[h].as_ref().unwrap();
-            let slot = c.items.iter().enumerate().find(|(k, i)| i.as_ref().is_some_and(|i| is_loot(i) && !b.sell_tried.contains(&(*k, i.count))));
+            let slot = c.items.iter().enumerate().find(|(k, i)| i.as_ref().is_some_and(|i| (is_loot(i) || is_surplus(c, *k, i, &b.equip_tried)) && !b.sell_tried.contains(&(*k, i.count))));
             if let Some((k, Some(it))) = slot {
                 let n = it.count;
                 b.sell_tried.push((k, n));
                 b.last_trade = now;
+                log(&format!("(bot) {}: sells {} x{n}", b.ch, String::from_utf8_lossy(&it.cfg.name)));
                 let mut f = common(COMMONTYPE_REQ_SELLITEMCONFIRM, pos, k as u32);
                 W(&mut f).u32(15, n);
                 self.bot_send(h, f);
@@ -898,6 +952,17 @@ impl Game {
                 let mut f = common(COMMONTYPE_REQ_PURCHASEITEM, pos, n);
                 W(&mut f).bytes(23, name.as_bytes());
                 self.bot_send(h, f);
+                return;
+            }
+        }
+        if cfg.repair {
+            let c = self.clients[h].as_ref().unwrap();
+            if let Some(k) = repair_slot(c, &b.equip_tried, &b.repair_tried, cfg.repair_pct, gold) {
+                log(&format!("(bot) {}: repairs {} (slot {k}, {} gold)", b.ch, String::from_utf8_lossy(&c.items[k].as_ref().unwrap().cfg.name), repair_price(c.items[k].as_ref().unwrap())));
+                b.repair_tried.push(k);
+                b.equip_tried.retain(|&t| t != k); // a repaired weapon may be worn again
+                b.last_trade = now;
+                self.bot_send(h, common(COMMONTYPE_REQ_REPAIRITEMCONFIRM, pos, k as u32));
                 return;
             }
         }
@@ -1017,5 +1082,56 @@ mod tests {
         assert!(w.is_empty(), "{w:?}");
         let d = BotCfg::default();
         assert_eq!((s.step_ms, s.potion_pct, s.login.as_str()), (d.step_ms, d.potion_pct, "127.0.0.1:4000"));
+    }
+
+    #[test]
+    fn surplus_gear_is_what_it_will_never_wear() {
+        let (tx, _rx) = unbounded_channel();
+        let mut c = Client::new(1, 1, tx, b"1.2.3.4".to_vec(), 0);
+        let gear = |pos: i32, dmg: i32| {
+            let mut it = Item::new(&Default::default());
+            (it.cfg.item_type, it.cfg.category, it.cfg.equip_pos, it.cfg.item_effect_value[0], it.cfg.item_effect_value[1]) = (1, 5, pos, dmg, 1);
+            (it.max_life_span, it.cur_life_span) = (100, 100);
+            it
+        };
+        c.items[0] = Some(gear(EQUIPPOS_RHAND, 3)); // wielded
+        c.items[1] = Some(gear(EQUIPPOS_RHAND, 2)); // worse weapon
+        c.items[2] = Some(gear(EQUIPPOS_RHAND, 9)); // better weapon
+        c.items[3] = Some(gear(EQUIPPOS_HEAD, 1)); // empty slot
+        c.items[4] = Some(gear(EQUIPPOS_BODY, 1)); // slot taken by 5
+        c.items[5] = Some(gear(EQUIPPOS_BODY, 1));
+        (c.equip_status[EQUIPPOS_RHAND as usize], c.equip_status[EQUIPPOS_BODY as usize]) = (0, 5);
+        let sur = |k: usize, tried: &[usize]| is_surplus(&c, k, c.items[k].as_ref().unwrap(), tried);
+        assert!(!sur(0, &[]) && sur(1, &[]) && !sur(2, &[]) && !sur(3, &[]) && sur(4, &[]) && !sur(5, &[]));
+        assert!(sur(3, &[3]), "a piece the server refused is surplus");
+        // a necklace is never worn by the bot; armour (category 11) is not "loot" and goes through the same rules
+        let mut neck = gear(EQUIPPOS_NECK, 1);
+        neck.cfg.category = 46;
+        assert!(is_surplus(&c, 6, &neck, &[]) && !is_loot(&neck));
+        // a broken piece is repaired, not sold
+        let mut broken = gear(EQUIPPOS_HEAD, 1);
+        (broken.max_life_span, broken.cur_life_span) = (100, 0);
+        assert!(!is_surplus(&c, 6, &broken, &[]));
+    }
+
+    #[test]
+    fn repair_picks_worn_and_broken_gear_it_can_pay() {
+        let (tx, _rx) = unbounded_channel();
+        let mut c = Client::new(1, 1, tx, b"1.2.3.4".to_vec(), 0);
+        let mut it = Item::new(&Default::default());
+        (it.cfg.item_type, it.cfg.category, it.cfg.equip_pos, it.cfg.price, it.price) = (1, 1, EQUIPPOS_RHAND, 1000, 1000);
+        (it.max_life_span, it.cur_life_span) = (100, 20);
+        c.items[0] = Some(it.clone());
+        c.equip_status[EQUIPPOS_RHAND as usize] = 0;
+        assert_eq!(repair_slot(&c, &[], &[], 30, 10_000), Some(0));
+        assert_eq!(repair_slot(&c, &[], &[0], 30, 10_000), None, "once per trip");
+        assert_eq!(repair_slot(&c, &[], &[], 30, 10), None, "too poor");
+        assert_eq!(repair_slot(&c, &[], &[], 10, 10_000), None, "still above the threshold");
+        // it broke while worn: the server unequipped it, but the bot remembers wearing it
+        c.equip_status[EQUIPPOS_RHAND as usize] = -1;
+        it.cur_life_span = 0;
+        c.items[0] = Some(it);
+        assert_eq!(repair_slot(&c, &[0], &[], 30, 10_000), Some(0));
+        assert_eq!(repair_slot(&c, &[], &[], 30, 10_000), None, "a looted broken piece is left alone");
     }
 }

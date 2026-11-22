@@ -1219,7 +1219,16 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   (`is_on_shop` is set by the map name), sells the loot (shop category 11-50: `COMMONTYPE_REQ_SELLITEMCONFIRM`, one item per
   `0.6 s`), buys potions and scrolls up to the targets (`COMMONTYPE_REQ_PURCHASEITEM`), then `Travel`s home; a trip is not
   repeated before `shop-cooldown-ms`, and one that lasts 3 minutes is dropped.
-Not yet: spells, fleeing on foot, selling unused weapons and armour, repairs, parties, PvP.
+- surplus gear: on the shop trip it also sells gear (shop category 1-10) it will never wear: a weapon no better than the one in
+  hand (`weapon_score` = twice the average damage, so a 1d6 beats a 1d5), a piece for a slot already filled, or one the server
+  refused to equip (`is_surplus`); gear for an empty slot stays in the bag for `bot_equip`.
+  `is_loot` (shop category 11-50) leaves out item type 1: armour (categories 11-13), cloaks and necklaces (46) are gear, never loot
+  (the server does not refuse to sell a worn piece), and gear for a slot the bot never fills (necklace, cloak, ring, pants) is surplus.
+- repairs (`repair`, `repair-percent`): a trip also starts when a worn piece, or one that broke while worn (the server unequips it
+  at 0 endurance), is under `repair-percent` % of its endurance and the bot has the gold; after the purchases it sends
+  `COMMONTYPE_REQ_REPAIRITEMCONFIRM` for each such piece (the server only wants the bot on a shop map) and wears the repaired
+  weapon again. Neutral characters never wear gear out (`is_neutral` in `combat.rs`), so this only matters after joining a town.
+Not yet: spells, fleeing on foot, parties, PvP.
 
 Test (isolated Login on other ports + a copy of `Maps/All`, same MySQL): `login --tcp-port 4100 --ws-port 4102 --gs-port 5757
 --no-db-maintenance`, `hg --login 127.0.0.1:5757` with a `Bots.cfg` (`bot-count = 1`, `bot-login-address = 127.0.0.1:4100`) and a
@@ -1229,4 +1238,10 @@ slimes in 2 hits, a death by a scorpion -> restart in `default` -> Travel throug
 Shop run (scratch `Settings.cfg` with `primary-drop-rate = 8000` so that monsters drop things, `shop-potion-min = 4`,
 `shop-cooldown-ms = 20000`): gold and potions picked up, trip to `gshop_1`, 8 red potions bought for 40 gold, back home and hunting;
 with `shop-bag-slots = 20` a second trip sold the loot (+76 gold) and bought a recall scroll.
+Six bots at once (`hg --bots 6`, same scratch setup, all set to Level 30 at aresden 115,58): two runs of about 8 minutes without a kick, bots shared the
+slime field, looted the same tiles without trouble, each made its own trips to `gshop_1` (about 1 minute each way) and sold potions
+of other kinds and surplus gear (a `ShortSword` equipped over the `Dagger`, then the dagger sold on the next trip); the debug `hg`
+used about 15 s of CPU in 7 minutes.
+Repair run (`Nation='Aresden'`, dagger `LifeSpan=20`, `shop-potion-min = 1`): trip to `gshop_1`, spare dagger sold, 7 potions bought,
+`repairs Dagger (slot 0, 11 gold)`, back home.
 Remove the rows afterwards (`char_database`, `item`, `bank_item`, `skill`, `account_database` for the bot names).
