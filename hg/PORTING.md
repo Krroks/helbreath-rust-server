@@ -132,6 +132,20 @@ batch C, all ported in batch E (reward.rs, website.rs; the `not ported yet` arms
 
 MSGID_REQUEST_ANGEL and MSGID_MANAGER_INIT / SHUTDOWN are dead (above).
 
+## Additions with no C++ original (v8.00 client features, 2026-11-23)
+
+These break the "wire-compatible with the original" rule on purpose: they exist only for features the v8.00 (Helbreath Apocalypse)
+client has and the 3.82-based one lacked. The original client never sends them, so nothing else changes.
+
+- **Ground item names** (v8.00 "Ground Items" option, client `/itemnames`): `MSGID_REQUEST_GROUNDITEMNAMES` (0x27B314E0 + modifier 3 =
+  0x27b314e3; client sends `[id u32][type u16][count u8]` + count x `[x i16][y i16]`, count <= 24) is answered by
+  `MSGID_RESPONSE_GROUNDITEMNAMES` (`[id u32][type u16][count u8]` + count x `[x i16][y i16][name 20][attribute u32][count u32]`). The
+  name is the item cfg name of the top item of the tile (`ground[(map,x,y)][0]`), an all-zero name means nothing lies there. Only tiles
+  within VIEW_NEAR_X x VIEW_NEAR_Y of the asker are answered, the rest of the request is dropped, and a client that has not finished
+  initialising gets no answer. Code: `request_ground_item_names` / `encode_ground_names` in items.rs (unit test `ground_names_layout`),
+  dispatch in game.rs, constants in consts.rs and `Shared/NetMessages.h`. Why a request and not a field of ITEMDROP: that event is a fixed
+  18-byte frame the 3.82 client parses, and tiles already holding an item at map init would need their own message anyway.
+
 ## Gameplay-visible fixes (the owner decides)
 
 - CLIENTTIMEOUT_MS (silent drop of a client that sends nothing) raised from 18 s to 60 s (2026-11-22): the web client in a background tab sends its 8 s CHECKCONNECTION about once a second at best and was dropped while idle. The drop now logs `Client(name) timed out`. The same constant bounds the speed-hack time gap in `check_connection`.
@@ -1265,6 +1279,11 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   nation are (its own maps too: it defends them) or, if there are none, to a map of the rival's territory with attack enabled, and
   for `raid-ms` attacks the nearest rival player in sight (melee, or a spell), drinking potions and reading the scroll as in the hunt;
   it ends hurt (`tired-percent`) or out of time and goes home. It is the only thing a bot does to players.
+- paces (`bot-pace-mix`, the `PACES` table in `bots.rs`): each bot gets a pace from the mix of weights relaxed / steady / driven (default
+  25,35,40; the bot's index is hashed so the slots spread). Relaxed: steps x1.7 and blows x1.5 of `step-ms` / `attack-ms`, sight x0.7,
+  2-7 s of getting its breath after every kill, and about every 4 minutes a break of about 45 s standing about (it is woken if something
+  hurts it); steady: x1.3 / x1.2, sight x0.85, 0.6-3 s, a 25 s break every 10 minutes; driven: the keys as they are (what the bots did
+  before). Every bot then gets +-15 % on each value, so no two are quite alike; the server's speed-hack floors (150 ms, 220 ms) still hold.
 Not yet: fleeing on foot, guilds (creating one asks for level 20 and 20 charisma), the crusade and the other events, fight zones
 (they need a reservation and a ticket), quests.
 
@@ -1291,4 +1310,6 @@ values): `Tst01` born at the `default` spawn at level 1, walked to the slimes, b
 and reached level 10 (2865 exp) 7 minutes after it logged in, alone.
 Casting, party and raid (levels set by SQL, all in `elvfarm`): the mage put its hands away, learned Magic-Missile at the shop (100 gold),
 the first two bots formed a party, and two opposite-side citizens raided each other (`rival player down`, bots died and restarted).
+Paces (12 new bots, prefix `tst`, 4.5 minutes from the spawn): kills per bot 15 on average for the 6 driven ones (5-30), 4.5 for the 4
+steady ones and 0.5 for the 2 relaxed ones (walking at 780-820 ms a step, blows at 0.9-1.1 s, a 46 s break); the mix gave 6 / 4 / 2.
 Remove the rows afterwards (`char_database`, `item`, `bank_item`, `skill`, `account_database` for the bot names).

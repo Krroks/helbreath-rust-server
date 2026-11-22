@@ -99,6 +99,7 @@ pub struct BotCfg {
     pub cast_ms: u32,
     pub learn_spells: bool,
     pub party: bool,
+    pub pace_mix: [u32; 3],
     pub party_range: i16,
     pub raid: bool,
     pub raid_level: i32,
@@ -159,6 +160,7 @@ impl Default for BotCfg {
             cast_ms: 1500,
             learn_spells: true,
             party: true,
+            pace_mix: [25, 35, 40],
             party_range: 10,
             raid: true,
             raid_level: 10,
@@ -222,6 +224,8 @@ cast                 = 1          // a character with an attack spell casts it a
 cast-range           = 6
 cast-ms              = 1500       // time between two casts
 learn-spells         = 1          // buys an attack spell it can learn (Int) at the shop
+bot-pace-mix         = 25,35,40   // weights of the paces relaxed, steady and driven: how many bots are slow and easy-going (slower steps and
+                                  // blows, a pause after each kill, now and then a few minutes of standing about), middling or as fast as the other keys say
 party                = 1          // bots of the same map and side near each other form parties (they share the exp)
 party-range          = 10
 raid                 = 1          // a citizen of raid-level or more now and then spends raid-ms in a map of the rival nation, fighting its players
@@ -280,6 +284,14 @@ impl BotCfg {
                 ("shop-bag-slots", Some(x)) => c.shop_bag_slots = x.clamp(1, 50) as usize,
                 ("shop-cooldown-ms", Some(x)) => c.shop_cooldown_ms = x.max(0) as u32,
                 ("repair-percent", Some(x)) => c.repair_pct = x.clamp(1, 99) as i32,
+                ("bot-pace-mix", _) => {
+                    let w: Vec<u32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                    if w.len() == 3 && w.iter().sum::<u32>() > 0 {
+                        c.pace_mix = [w[0], w[1], w[2]];
+                    } else {
+                        warn.push(format!("bot-pace-mix wants three weights like 25,35,40, got '{v}'"));
+                    }
+                }
                 ("party-range", Some(x)) => c.party_range = x.clamp(2, 20) as i16,
                 ("raid-level", Some(x)) => c.raid_level = x.clamp(1, 180) as i32,
                 ("raid-cooldown-ms", Some(x)) => c.raid_cooldown_ms = x.max(0) as u32,
@@ -324,6 +336,24 @@ impl BotCfg {
 }
 
 // ------------------------------------------------------------------ state
+
+/// How a bot plays: multipliers of `step-ms`, `attack-ms` and `sight`, the pause after a kill (min, max ms) and the
+/// breaks (about every `break_every` ms it stands about for about `break_len` ms; 0 = never). Each bot then gets +-15 %.
+struct Pace {
+    name: &'static str,
+    step: f32,
+    attack: f32,
+    sight: f32,
+    react: (u32, u32),
+    break_every: u32,
+    break_len: u32,
+}
+
+const PACES: [Pace; 3] = [
+    Pace { name: "relaxed", step: 1.7, attack: 1.5, sight: 0.7, react: (2000, 7000), break_every: 240_000, break_len: 45_000 },
+    Pace { name: "steady", step: 1.3, attack: 1.2, sight: 0.85, react: (600, 3000), break_every: 600_000, break_len: 25_000 },
+    Pace { name: "driven", step: 1.0, attack: 1.0, sight: 1.0, react: (0, 0), break_every: 0, break_len: 0 },
+];
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 enum Mode {
@@ -401,6 +431,18 @@ pub struct Bot {
     raid_target: usize,
     raid_kills: u32,
     last_level: i32,
+    /// its pace (index in PACES) and what that makes of the timings
+    pace: usize,
+    step_ms: u32,
+    attack_ms: u32,
+    sight: i16,
+    react: (u32, u32),
+    break_every: u32,
+    break_len: u32,
+    react_until: u32,
+    next_break: u32,
+    pause_until: u32,
+    pause_hp: i32,
     spell_tried: Vec<Vec<u8>>,
     /// the bag slot of the last equip command and when: it is not sold before the server has worn it
     last_equip_slot: (usize, u32),
@@ -429,7 +471,25 @@ impl Bots {
         let list = (1..=cfg.count)
             .map(|i| {
                 let a = cfg.archetypes.get((i - 1) % cfg.archetypes.len().max(1)).map_or("warrior", |a| a.as_str());
-                Bot { acc: format!("{}{i:02}", cfg.account_prefix), ch: format!("{}{i:02}", cfg.name_prefix), arch: (a == "mage") as u8, ..Default::default() }
+                // the pace: bot i takes a slot of 0..100 spread by a multiplicative hash, the mix cuts the slots
+                let total: u32 = cfg.pace_mix.iter().sum();
+                let slot = (i as u32).wrapping_mul(2_654_435_761) % 100 * total / 100;
+                let pace = if slot < cfg.pace_mix[0] { 0 } else if slot < cfg.pace_mix[0] + cfg.pace_mix[1] { 1 } else { 2 };
+                let p = &PACES[pace];
+                let j = |k: u32| 0.85 + (((i as u32).wrapping_mul(k).wrapping_mul(2_246_822_519) >> 8) % 31) as f32 / 100.0;
+                Bot {
+                    acc: format!("{}{i:02}", cfg.account_prefix),
+                    ch: format!("{}{i:02}", cfg.name_prefix),
+                    arch: (a == "mage") as u8,
+                    pace,
+                    step_ms: ((cfg.step_ms as f32 * p.step * j(3)) as u32).max(MIN_STEP_MS),
+                    attack_ms: ((cfg.attack_ms as f32 * p.attack * j(5)) as u32).max(MIN_ATTACK_MS),
+                    sight: ((cfg.sight as f32 * p.sight * j(7)) as i16).clamp(4, 14),
+                    react: p.react,
+                    break_every: (p.break_every as f32 * j(11)) as u32,
+                    break_len: (p.break_len as f32 * j(13)) as u32,
+                    ..Default::default()
+                }
             })
             .collect();
         Bots { list, cfg: Arc::new(cfg), peace: Vec::new() }
@@ -774,6 +834,10 @@ impl Game {
             return;
         }
         let (pos, m, hp, max_hp) = ((c.x, c.y), c.map_index, c.hp, c.get_max_hp());
+        if b.last_level == 0 {
+            let p = &PACES[b.pace];
+            log(&format!("(bot) {}: {} pace (step {} ms, blow {} ms, sight {}, pause after a kill {}-{} ms, break every ~{} s for ~{} s)", b.ch, p.name, b.step_ms, b.attack_ms, b.sight, b.react.0, b.react.1, b.break_every / 1000, b.break_len / 1000));
+        }
         if c.level != b.last_level {
             log(&format!("(bot) {}: level {} ({} exp, {})", b.ch, c.level, c.exp, if c.is_neutral() { "neutral" } else { "citizen" }));
             b.last_level = c.level;
@@ -1007,16 +1071,16 @@ impl Game {
             b.raid_target = 0;
         }
         if b.raid_target == 0 {
-            let best = self.handles().into_iter().filter_map(|j| alive(self, j).map(|t| (cheb(pos, t), j))).filter(|&(d, _)| d <= cfg.sight * 2).min();
+            let best = self.handles().into_iter().filter_map(|j| alive(self, j).map(|t| (cheb(pos, t), j))).filter(|&(d, _)| d <= b.sight * 2).min();
             b.raid_target = best.map_or(0, |(_, j)| j);
         }
         if let Some((tx, ty)) = alive(self, b.raid_target) {
             if cfg.cast && cheb(pos, (tx, ty)) <= cfg.cast_range && self.bot_attack_spell(h).is_some() {
-                if now.wrapping_sub(b.last_cast) >= cfg.cast_ms && self.bot_cast(h, pos, (tx, ty), now) {
+                if now.wrapping_sub(b.last_cast) >= cfg.cast_ms * b.attack_ms / cfg.attack_ms.max(1) && self.bot_cast(h, pos, (tx, ty), now) {
                     b.last_cast = now;
                 }
             } else if cheb(pos, (tx, ty)) <= 1 {
-                if now.wrapping_sub(b.last_attack) >= cfg.attack_ms {
+                if now.wrapping_sub(b.last_attack) >= b.attack_ms {
                     b.last_attack = now;
                     let f = motion(OBJECTATTACK, pos, dir_to(pos, (tx, ty)).max(1), now, Some((tx, ty, 1, b.raid_target as u16)));
                     self.bot_send(h, f);
@@ -1040,6 +1104,14 @@ impl Game {
         let (pos, m, hp, max_hp) = st;
         if self.bot_survive(h, b, cfg, pos, (hp, max_hp), now) {
             return;
+        }
+        // a break: it stands about until the time is up, or until something hurts it
+        if b.pause_until != 0 && now.wrapping_sub(b.pause_until) as i32 <= 0 {
+            if hp >= b.pause_hp {
+                return;
+            }
+            b.pause_until = now;
+            log(&format!("(bot) {}: hit during its break, back to it", b.ch));
         }
         // asked to put the weapons away for a party invitation
         if self.bots.peace.iter().any(|(n, t)| *n == b.ch && now.wrapping_sub(*t) as i32 <= 0) {
@@ -1066,11 +1138,28 @@ impl Game {
             }
             b.target = 0;
             b.path.clear();
+            if b.react.1 > 0 {
+                b.react_until = now.wrapping_add(b.react.0 + self.dice(1, (b.react.1 - b.react.0) as i32) as u32); // a breather after a kill
+            }
         }
         b.ignore.retain(|&(_, t)| now.wrapping_sub(t) as i32 <= 0);
         let tired = hp * 100 < max_hp * cfg.tired_pct;
         let max_dice = self.bot_max_dice(h, cfg);
         // between two fights: supplies first, then what lies about, then the next monster
+        if b.target == 0 && !tired && now.wrapping_sub(b.react_until) as i32 <= 0 && b.react_until != 0 {
+            return; // still getting its breath after the last kill
+        }
+        if b.target == 0 && !tired && b.break_every > 0 {
+            if b.next_break == 0 {
+                b.next_break = now.wrapping_add(b.break_every / 2 + self.dice(1, b.break_every as i32) as u32);
+            } else if now.wrapping_sub(b.next_break) as i32 >= 0 {
+                let len = b.break_len / 2 + self.dice(1, b.break_len as i32) as u32;
+                b.next_break = now.wrapping_add(len).wrapping_add(b.break_every / 2 + self.dice(1, b.break_every as i32) as u32);
+                (b.pause_until, b.pause_hp) = (now.wrapping_add(len), hp);
+                log(&format!("(bot) {}: takes a break of {} s", b.ch, len / 1000));
+                return;
+            }
+        }
         if b.target == 0 && !tired && self.bot_maybe_enlist(h, b, cfg, now) {
             return;
         }
@@ -1092,7 +1181,7 @@ impl Game {
         }
         if b.target == 0 {
             // hurt: only what is already on top of it
-            let sight = if tired { 2 } else { cfg.sight };
+            let sight = if tired { 2 } else { b.sight };
             let mut best = (i16::MAX, 0);
             for dx in -sight..=sight {
                 for dy in -sight..=sight {
@@ -1121,7 +1210,7 @@ impl Game {
                     b.target = 0;
                     return;
                 }
-                if now.wrapping_sub(b.last_cast) >= cfg.cast_ms && self.bot_cast(h, pos, (tx, ty), now) {
+                if now.wrapping_sub(b.last_cast) >= cfg.cast_ms * b.attack_ms / cfg.attack_ms.max(1) && self.bot_cast(h, pos, (tx, ty), now) {
                     b.last_cast = now;
                     b.attacks += 1;
                 }
@@ -1139,7 +1228,7 @@ impl Game {
                     b.target = 0;
                     return;
                 }
-                if now.wrapping_sub(b.last_attack) >= cfg.attack_ms {
+                if now.wrapping_sub(b.last_attack) >= b.attack_ms {
                     b.last_attack = now;
                     b.attacks += 1;
                     let f = motion(OBJECTATTACK, pos, dir_to(pos, (tx, ty)).max(1), now, Some((tx, ty, 1, 10000 + b.target as u16)));
@@ -1584,7 +1673,7 @@ impl Game {
             if !self.bot_walk(h, b, cfg, at, g, 0, None, cfg.path_limit, now) {
                 b.loot_skip.push((g, now.wrapping_add(120_000)));
             }
-        } else if now.wrapping_sub(b.last_attack) >= cfg.attack_ms {
+        } else if now.wrapping_sub(b.last_attack) >= b.attack_ms {
             b.last_attack = now;
             b.loot_tries += 1;
             if b.loot_tries > 4 {
@@ -1599,7 +1688,7 @@ impl Game {
 
     /// One step along the route to within `reach` of `goal`, planning it first when there is none. `allow` is a tile that
     /// may be entered although it is a teleport tile.
-    fn bot_walk(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), goal: (i16, i16), reach: i16, allow: Option<(i16, i16)>, limit: i16, now: u32) -> bool {
+    fn bot_walk(&mut self, h: usize, b: &mut Bot, _cfg: &BotCfg, at: ((i16, i16), usize), goal: (i16, i16), reach: i16, allow: Option<(i16, i16)>, limit: i16, now: u32) -> bool {
         let (pos, m) = at;
         if let Some(k) = b.path.iter().position(|&p| p == pos) {
             b.path.drain(..=k);
@@ -1622,7 +1711,7 @@ impl Game {
                 }
             }
         }
-        if now.wrapping_sub(b.last_step) >= cfg.step_ms {
+        if now.wrapping_sub(b.last_step) >= b.step_ms {
             b.last_step = now;
             b.stuck += 1;
             let f = motion(OBJECTMOVE, pos, dir_to(pos, b.path[0]), now, None);
@@ -1703,6 +1792,23 @@ mod tests {
         let mut broken = gear(EQUIPPOS_HEAD, 1);
         (broken.max_life_span, broken.cur_life_span) = (100, 0);
         assert!(!is_surplus(&c, 6, &broken, &[], false));
+    }
+
+    #[test]
+    fn paces_follow_the_mix_and_stay_legal() {
+        let mut cfg = BotCfg { count: 50, ..Default::default() };
+        let bots = Bots::new(cfg.clone());
+        let n = |p: usize| bots.list.iter().filter(|b| b.pace == p).count();
+        // 25 / 35 / 40 %: the hash spreads the slots, so within a few bots of the ideal
+        assert!((n(0) as i32 - 12).abs() <= 5 && (n(1) as i32 - 17).abs() <= 6 && (n(2) as i32 - 20).abs() <= 6, "{} {} {}", n(0), n(1), n(2));
+        assert!(bots.list.iter().all(|b| b.step_ms >= MIN_STEP_MS && b.attack_ms >= MIN_ATTACK_MS && (4..=14).contains(&b.sight)));
+        // a slow bot is slower than a driven one, and no two are alike
+        let avg = |p: usize| bots.list.iter().filter(|b| b.pace == p).map(|b| b.step_ms).sum::<u32>() / n(p).max(1) as u32;
+        assert!(avg(0) > avg(1) && avg(1) > avg(2));
+        assert!(bots.list.iter().map(|b| b.step_ms).collect::<std::collections::HashSet<_>>().len() > 10);
+        // one weight only: every bot has that pace
+        cfg.pace_mix = [0, 0, 1];
+        assert!(Bots::new(cfg).list.iter().all(|b| b.pace == 2));
     }
 
     #[test]
