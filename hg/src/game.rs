@@ -16,7 +16,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub const MAXSUBLOGSOCK: usize = 5;
 pub const MAXCLIENTS_: usize = MAXCLIENTS as usize;
-pub const CLIENTTIMEOUT_MS: u32 = 18_000;
+// fix: 18 s in the C++; a browser tab in the background runs the web client's loop (and its CHECKCONNECTION every 8 s) about once a second or slower, so players were dropped while idle
+pub const CLIENTTIMEOUT_MS: u32 = 60_000;
 
 pub enum From {
     Client(usize),
@@ -515,6 +516,7 @@ impl Game {
         for h in self.handles() {
             let Some(c) = self.clients[h].as_mut() else { continue };
             if now.wrapping_sub(c.time) > CLIENTTIMEOUT_MS {
+                log(&format!("<{h}> Client({}) timed out: nothing received for {} ms", l1(&c.char_name), now.wrapping_sub(c.time)));
                 let init = c.is_init_complete;
                 self.delete_client(h, init, init, true, false);
                 continue;
