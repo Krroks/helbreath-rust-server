@@ -1235,7 +1235,38 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   that has some, through the teleport tiles), makes that tile its new home and `Travel`s there; every 20 s at most. The bot
   only fights monsters whose HitDice is at most `2 + level / hunt-level-step` (level 1: slimes; 12: orcs and amphis; 24:
   scorpions; 0 = any); a monster it cannot beat is left alone in sight and in the ground search.
-Not yet: spells, fleeing on foot, parties, PvP.
+- goals, in the order the brain looks at them between two fights (`bot_hunt`): level-up points, enlist, raid, shop (supplies, gear,
+  spells, repairs, sales), loot, the hunting ground. Each is a Mode (`Hunt`, `Rest`, `Travel`, `Shop`, `Enlist`, `Raid`) or a one-shot
+  command; the bot always comes back to `Hunt`.
+- level-up points (`bot-archetypes`): the server lets a character spend `(level - 1) * 3 + 70 - (the six stats)` points in all, so the
+  pool of 3 a new character shows cannot be spent (`c_pool`). A warrior's points go str, vit, str, dex; a mage's int, mag, int, vit
+  (`MSGID_LEVELUPSETTINGS`). `bot-archetypes = warrior,mage` is a list that bot N takes entry N from, cycling.
+- enlisting (`enlist`, `enlist-level`, `bot-nation`): a neutral bot of level 5 (what `request_civil_right` asks) goes to the city map
+  named `aresden` or `elvine` (random unless `bot-nation`), sends `MSGID_REQUEST_CIVILRIGHT` (up to 3 times, 2.5 s apart) and
+  settles in the city as its new home. `Traveler` characters never wear gear out (`is_neutral` in `combat.rs`), citizens do.
+- gear (`buy-gear`, `gear-reserve`): level-ups pay 500 gold up to level 50 (`life.rs`). On a shop trip it buys what `wear_score` would
+  put on: armour for an empty slot first (the best defence it can wear: level, gender, weight, stat limits), else a better weapon,
+  never twice for the same slot (what is in the bag waiting counts). `wear_score` is the one rule `bot_equip` and `bot_wish` share.
+  The shop it picks must let it leave again (to its home, or to any map with monsters): `gshop_2f` is a dead end.
+- hunting ladder: when its level raises `2 + level / hunt-level-step` it looks for a stronger ground on its map at once (`bot_roam`
+  with `forced`), not only after 8 s without monsters; maps with attack disabled (towns) are never hunting grounds.
+- magic (`cast`, `cast-range`, `cast-ms`, `learn-spells`): on a shop trip it learns the dearest attack spell (Magic.cfg category 1,
+  type 1 or 3) its Int and gold allow (`COMMONTYPE_REQ_STUDYMAGIC`; a citizen has to be in a shop map), and with one learned it
+  casts at monsters (and at players in a raid) within `cast-range`: the precast motion `OBJECTMAGIC`, then `COMMONTYPE_MAGIC` with the
+  tile and the spell + 100. The server refuses a spell with a weapon or a shield in hand (`player_magic`), so a mage bot puts them
+  away (`COMMONTYPE_RELEASEITEM`), never wears or buys them and sells them as surplus.
+- parties (`party`, `party-range`): a bot with no party invites the nearest bot of its map and side within `party-range`: one in a
+  party with room first, otherwise a free one with a higher handle (so two never invite each other). `join_party_cmd` refuses an
+  invitation to a player in combat mode, so the inviter first asks the target (`Bots::peace`) to toggle it off for 10 s; a bot with a
+  pending invitation from another bot accepts it at once (`COMMONTYPE_REQUEST_ACCEPTJOINPARTY`). Taking a nationality dissolves the
+  party (`request_civil_right`).
+- raids (`raid`, `raid-level`, `raid-cooldown-ms`, `raid-ms`): a citizen of level 10 or more, with 80 % of its HP, one cool-down after
+  it logs in and then every cool-down (each look: 1 in 3, else it looks again in a minute) goes to a map where players of the rival
+  nation are (its own maps too: it defends them) or, if there are none, to a map of the rival's territory with attack enabled, and
+  for `raid-ms` attacks the nearest rival player in sight (melee, or a spell), drinking potions and reading the scroll as in the hunt;
+  it ends hurt (`tired-percent`) or out of time and goes home. It is the only thing a bot does to players.
+Not yet: fleeing on foot, guilds (creating one asks for level 20 and 20 charisma), the crusade and the other events, fight zones
+(they need a reservation and a ticket), quests.
 
 Test (isolated Login on other ports + a copy of `Maps/All`, same MySQL): `login --tcp-port 4100 --ws-port 4102 --gs-port 5757
 --no-db-maintenance`, `hg --login 127.0.0.1:5757` with a `Bots.cfg` (`bot-count = 1`, `bot-login-address = 127.0.0.1:4100`) and a
@@ -1254,4 +1285,10 @@ Repair run (`Nation='Aresden'`, dagger `LifeSpan=20`, `shop-potion-min = 1`): tr
 Hunting ground run (3 bots, prefix `tst`, created by the bots themselves at the `default` spawn, level 1): ~8 s without a monster, a
 ground at `default(100,85)`, 20 s walk, slimes killed in 1-3 hits; started inside `gshop_1`, they left through the teleports and
 were killing at `aresden` 40 s later.
+Goal run (3 new bots, prefix `tst`, `bot-archetypes = warrior,mage,warrior`, `primary-drop-rate = 1` like the real Settings.cfg, default shop
+values): `Tst01` born at the `default` spawn at level 1, walked to the slimes, bought armour at the shop with the level-up gold, went to
+`elvine` at level 5, enlisted (`enlisted (elvine)`), then hunted with a stronger ground at level 6 (HitDice 3), bought a better weapon
+and reached level 10 (2865 exp) 7 minutes after it logged in, alone.
+Casting, party and raid (levels set by SQL, all in `elvfarm`): the mage put its hands away, learned Magic-Missile at the shop (100 gold),
+the first two bots formed a party, and two opposite-side citizens raided each other (`rival player down`, bots died and restarted).
 Remove the rows afterwards (`char_database`, `item`, `bank_item`, `skill`, `account_database` for the bot names).
