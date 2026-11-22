@@ -908,7 +908,7 @@ impl Server {
         // short promoted to int and printed with %u
         let appr1 = (((d.u8(62) as i32) << 8 | (d.u8(63) as i32) << 4 | d.u8(64) as i32) as i16) as i32 as u32;
         let sql = format!(
-            "INSERT INTO `char_database` (`account_name`, `char_name`, `Strenght` , `Vitality` , `Dexterity` , `Intelligence` , `Magic` , `Agility` , `Appr1`, `Gender` , `Skin` , `HairStyle` , `HairColor` , `Underwear` , `HP` , `MP` , `SP`) VALUES ( '{ga}', '{gc}' , '{str_}' , '{vit}' , '{dex}' , '{int}' , '{mag}' , '{agi}' ,'{appr1}' , '{}', '{}', '{}' , '{}' , '{}' , '{}','{}','{}');",
+            "INSERT INTO `char_database` (`account_name`, `char_name`, `Strenght` , `Vitality` , `Dexterity` , `Intelligence` , `Magic` , `Agility` , `Appr1`, `Gender` , `Skin` , `HairStyle` , `HairColor` , `Underwear` , `HP` , `MP` , `SP`, `AdminLevel`) VALUES ( '{ga}', '{gc}' , '{str_}' , '{vit}' , '{dex}' , '{int}' , '{mag}' , '{agi}' ,'{appr1}' , '{}', '{}', '{}' , '{}' , '{}' , '{}','{}','{}', '0');",
             d.u8(60),
             d.u8(61),
             d.u8(62),
@@ -1050,7 +1050,7 @@ impl Server {
         }
         // fixed: the C++ stored the quiz in `Email`
         let sql = format!(
-            "INSERT INTO `account_database` SET `name` = '{}' , `password` = '{}', `LoginIpAddress` = '{}', `ValidDate` = '{valid_date}', `Email` = '{}', `Quiz` = '{}', `Answer` = '{}';",
+            "INSERT INTO `account_database` SET `name` = '{}' , `password` = '{}', `IsGMAccount` = '0', `LoginIpAddress` = '{}', `ValidDate` = '{valid_date}', `Email` = '{}', `Quiz` = '{}', `Answer` = '{}';",
             good(&acc),
             good(&pwd),
             good(ip.as_bytes()),

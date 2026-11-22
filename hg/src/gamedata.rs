@@ -17,6 +17,9 @@ pub fn is_number(t: &[u8]) -> bool {
 
 /// One record: the keyword token opens it, then `n` field tokens. `end` stops decoding (`[ENDITEMLIST]`, `[END]`).
 /// Returns None when the text ends inside a record (the C++ "contents error").
+/// NPC.cfg ExpDice multiplier: with the /100 in create_npc, x170 gives about the exp of the 3.82 NPC.cfg (median ratio)
+pub const NPC_EXP_MULTIPLIER: i32 = 170;
+
 fn records(text: &[u8], key: &[u8], n: usize, end: Option<&[u8]>) -> Option<Vec<Vec<Vec<u8>>>> {
     let mut t = StrTok::new(text, b"= \t\n");
     let (mut out, mut cur): (Vec<Vec<Vec<u8>>>, Option<Vec<Vec<u8>>>) = (Vec::new(), None);
@@ -94,6 +97,8 @@ pub struct NpcCfg {
     pub max_mana: i32,
     pub magic_hit_ratio: i32,
     pub attack_range: i32,
+    /// Rust only: NPC.cfg Gold column (the C++ decoder has it commented out, so its gold drop never happened)
+    pub gold_drop: i32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -288,7 +293,7 @@ impl GameData {
 
     /// `_bDecodeNpcConfigFileContents`: records are numbered in file order.
     pub fn decode_npcs(&mut self, text: &[u8]) -> bool {
-        let Some(recs) = records(text, b"Npc", 24, None) else { return false };
+        let Some(recs) = records(text, b"Npc", 25, None) else { return false };
         for (i, f) in recs.iter().enumerate() {
             if f.iter().skip(1).any(|t| !is_number(t)) {
                 return false;
@@ -305,7 +310,8 @@ impl GameData {
                 defense_ratio: n(3),
                 hit_ratio: n(4),
                 min_bravery: n(5),
-                exp_dice: n(6).wrapping_mul(100000),
+                // Rust only (owner, 2026-11-22): 3.82-like rate; the C++ used x100000 (one slime = ~60 levels)
+                exp_dice: n(6).wrapping_mul(NPC_EXP_MULTIPLIER),
                 attack_dice_throw: n(7),
                 attack_dice_range: n(8),
                 size: n(9),
@@ -323,6 +329,7 @@ impl GameData {
                 max_mana: n(21),
                 magic_hit_ratio: n(22),
                 attack_range: n(23),
+                gold_drop: n(24),
             });
         }
         true
@@ -466,10 +473,10 @@ mod tests {
     #[test]
     fn npcs_skills_teleports_dups() {
         let mut g = GameData::new();
-        let npc = b"Npc = Slime 10 2 10 10 1 1 1 4 0 0 0 1200 0 0 0 0 6 5000 0 0 0 0 1\nNpc = Orc 14 5 20 30 5 2 2 6 0 0 0 1000 0 0 0 0 6 5000 0 0 0 0 1";
+        let npc = b"Npc = Slime 10 2 10 10 1 1 1 4 0 0 0 1200 0 0 0 0 6 5000 0 0 0 0 1 30\nNpc = Orc 14 5 20 30 5 2 2 6 0 0 0 1000 0 0 0 0 6 5000 0 0 0 0 1 60";
         assert!(g.decode_npcs(npc));
         assert_eq!(g.find_npc("Orc"), Some(14));
-        assert_eq!(g.npcs[0].as_ref().unwrap().exp_dice, 100000);
+        assert_eq!((g.npcs[0].as_ref().unwrap().exp_dice, g.npcs[0].as_ref().unwrap().gold_drop), (NPC_EXP_MULTIPLIER, 30));
         assert!(!g.decode_npcs(b"Npc = Slime 10 2"));
         assert!(g.decode_skills(b"skill = 0 Mining 1 0 0 0 0 0 0"));
         assert!(!g.decode_skills(b"skill = 99 Bad 1 0 0 0 0 0 0"));

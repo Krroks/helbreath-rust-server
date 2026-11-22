@@ -261,7 +261,8 @@ pub fn init_stats(it: &mut Item, r: &mut Rng, g: i32) {
 
 impl Game {
     /// `NpcDeadItemGenerator`. `m_drops` is empty in the C++ (InitDrops is never called), so the droplist branch is
-    /// never taken; dwGoldDropValue is never loaded, so the gold branch (30 %) drops nothing.
+    /// never taken. The C++ never loads dwGoldDropValue, so its gold branch (30 %) dropped nothing; here it uses the
+    /// NPC.cfg Gold column (owner, 2026-11-22).
     pub fn npc_dead_item_generator(&mut self, i: usize, ah: usize, at: u8) {
         let Some(n) = self.npcs.get(i).and_then(|n| n.as_ref()) else { return };
         if at != OWNERTYPE_PLAYER || n.is_summoned || matches!(n.type_, NPC_GUARD | NPC_DUMMY | NPC_AGT | NPC_CGT | NPC_DT) {
@@ -280,21 +281,47 @@ impl Game {
         if p <= self.rng.dice(1, 10000) {
             return;
         }
-        if self.rng.dice(1, 10000) <= 3000 {
-            return; // gold: dwGoldDropValue == 0
-        }
-        let id = if self.rng.dice(1, 10000) <= self.settings.secondary_drop_rate + self.settings.rep_drop_modifier {
-            secondary_item(&mut self.rng)
-        } else {
-            if g == 0 {
+        let it = if self.rng.dice(1, 10000) <= 3000 {
+            // gold: value <= 4 -> 1d(value), else value +/- 1d(value/5); doubled with a special ability; +AddGold %
+            let n = self.npcs[i].as_ref().unwrap();
+            let (npc_name, sa) = (n.npc_name.clone(), n.special_ability);
+            let v = self.data.npcs.iter().flatten().find(|c| Game::pad20(&c.name) == Game::pad20(&npc_name)).map_or(0, |c| c.gold_drop);
+            if v <= 0 {
                 return;
             }
-            gen_level_item(&mut self.rng, g)
+            let mut count = if v <= 4 {
+                self.rng.dice(1, v)
+            } else if self.rng.dice(1, 2) == 1 {
+                v + self.rng.dice(1, v / 5)
+            } else {
+                v - self.rng.dice(1, v / 5)
+            };
+            if sa != 0 {
+                count *= 2;
+            }
+            if let Some(c) = self.client(ah) {
+                count += (c.fx.add_gold as f64 / 100.0 * count as f64) as i32;
+            }
+            let Some(cfg) = self.data.item_by_name(b"Gold").cloned() else { return };
+            let mut it = Item::new(&cfg);
+            it.count = count.max(1) as u32;
+            it
+        } else {
+            let id = if self.rng.dice(1, 10000) <= self.settings.secondary_drop_rate + self.settings.rep_drop_modifier {
+                secondary_item(&mut self.rng)
+            } else {
+                if g == 0 {
+                    return;
+                }
+                gen_level_item(&mut self.rng, g)
+            };
+            let Some(cfg) = self.data.item_by_id(id).cloned() else { return };
+            let mut it = Item::new(&cfg);
+            it.count = 1;
+            init_stats(&mut it, &mut self.rng, g);
+            it
         };
-        let Some(cfg) = self.data.item_by_id(id).cloned() else { return };
-        let mut it = Item::new(&cfg);
-        it.count = 1;
-        init_stats(&mut it, &mut self.rng, g);
+        let mut it = it;
         it.touch_effect_type = ITET_ID as i16;
         let t = crate::chrono_now();
         it.touch_effect_value = [self.rng.dice(1, 100000) as i16, self.rng.dice(1, 100000) as i16, (t.month * 100 + t.day) as i16];

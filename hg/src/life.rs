@@ -12,9 +12,10 @@ use crate::util::{cstr, Rd, W};
 
 pub const ITEMTYPE_CONSUME: i32 = 5;
 
-/// `GetExp` without parties: exp / 100, then a bonus of 2.5% per level under 80 (+2.5%).
+/// `GetExp` without parties: a bonus of 2.5% per level under 80 (+2.5%).
 pub fn exp_gain(level: i32, exp: i32) -> i32 {
-    let mut e = exp / 100;
+    // Rust only: the C++ /100 moved to the NPC exp (create_npc), so other sources give their 3.82 amounts
+    let mut e = exp;
     if level <= 80 {
         // the C++ constants are floats (0.025f, 1.025f): level 41 gives 1.99999999, not 2
         e = (((80 - level) as f64 * 0.025f32 as f64 + 1.025f32 as f64) * e as f64) as i32;
@@ -785,10 +786,10 @@ mod tests {
     #[test]
     fn life_formulas() {
         // level 1: (79 * 0.025 + 1.025) = 3.0 -> 300000 exp / 100 * 3
-        assert_eq!(exp_gain(1, 300_000), 9000);
-        assert_eq!(exp_gain(80, 1000), 10);
-        assert_eq!(exp_gain(100, 1000), 10);
-        assert_eq!(exp_gain(1, 99), 0);
+        assert_eq!(exp_gain(1, 3000), 9000);
+        assert_eq!(exp_gain(80, 10), 10);
+        assert_eq!(exp_gain(100, 10), 10);
+        assert_eq!(exp_gain(1, 0), 0);
         assert_eq!(hp_regen(3, 20, 0), 10);
         assert_eq!(hp_regen(15, 20, 0), 15);
         assert_eq!(hp_regen(16, 20, 4), 12);

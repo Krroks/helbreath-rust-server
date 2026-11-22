@@ -288,7 +288,9 @@ impl Game {
         let cfg = self.data.npcs.iter().flatten().find(|c| Game::pad20(&c.name) == Game::pad20(npc_name))?.clone();
         // initNpcAttr
         let hp = if cfg.hit_dice <= 5 { (self.dice(cfg.hit_dice, 4) + cfg.hit_dice).abs() } else { (cfg.hit_dice * 5 + self.dice(1, cfg.hit_dice)).abs() };
-        let exp = self.dice(cfg.exp_dice, 4) + cfg.exp_dice;
+        // Rust only (owner, 2026-11-22): the C++ GetExp divided every exp by 100 (for its x100000 NPC exp), which left
+        // quests, skills, crafting and farming at ~0; the /100 now only applies to the NPC exp, here
+        let exp = (self.dice(cfg.exp_dice, 4) + cfg.exp_dice) / 100;
         let attack_strategy = self.dice(1, 10);
         let ai_level = self.dice(1, 3);
         // initNpcAttr: the special ability raises the exp (3/4 also change the damage absorption)

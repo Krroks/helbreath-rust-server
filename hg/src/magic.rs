@@ -53,6 +53,8 @@ pub struct Spell {
     pub h: i16,
     pub v: i16,
     pub val: [i32; 8],
+    /// gold cost: negative = not for sale (the GM-Kill spells)
+    pub cost: i32,
     pub category: i32,
     pub attr: i32,
 }
@@ -71,6 +73,7 @@ impl Spell {
             h: (n(6) / 2) as i16,
             v: (n(7) / 2) as i16,
             val: std::array::from_fn(|k| n(8 + k)),
+            cost: n(17),
             category: n(18),
             attr: n(19),
         })
@@ -288,6 +291,11 @@ impl Game {
             return;
         };
         let c = self.client(h).unwrap();
+        // Rust only: GM spells (cost < 0) are refused to players even if their mastery byte says learned
+        if sp.cost < 0 && !c.is_gm() {
+            mlog("(MAGIA) rechazado: hechizo de GM");
+            return;
+        }
         if !item_effect && mastery != 1 {
             mlog("(MAGIA) rechazado: el jugador no tiene aprendido ese hechizo");
             return;

@@ -137,11 +137,14 @@ pub struct Game {
 
 /// `iGetLevelExp`, with the C++ int arithmetic (it wraps above level ~880).
 pub fn level_exp(l: i32) -> u32 {
-    if l == 0 {
-        return 0;
+    // Rust only (owner, 2026-11-22): the 3.82 cumulative table; the C++ HBI used l*l + l*(50 + ...) (not summed),
+    // which with its exp x100000 made a slime worth ~60 levels. Saturates past ~level 290 (u32).
+    let mut t: u64 = 0;
+    for k in 1..=l.max(0) as u64 {
+        let q = k / 17;
+        t += k * (50 + k * q * q);
     }
-    let q = l / 17;
-    (l.wrapping_mul(l)).wrapping_add(l.wrapping_mul(50i32.wrapping_add(l.wrapping_mul(q).wrapping_mul(q)))) as u32
+    t.min(u32::MAX as u64) as u32
 }
 
 /// `bReadCrusadeGUIDFile`: (CrusadeGUID, winner-side)
@@ -1151,8 +1154,8 @@ impl Game {
 mod tests {
     #[test]
     fn exp_table() {
-        assert_eq!(super::level_exp(1), 51);
-        assert_eq!(super::level_exp(17), 17 * 17 + 17 * (50 + 17));
-        assert_eq!(super::level_exp(100), 100 * 100 + 100 * (50 + 100 * 5 * 5));
+        assert_eq!((super::level_exp(0), super::level_exp(1), super::level_exp(2), super::level_exp(10)), (0, 50, 150, 2750));
+        assert_eq!(super::level_exp(17), super::level_exp(16) + 17 * (50 + 17));
+        assert_eq!(super::level_exp(899), u32::MAX);
     }
 }

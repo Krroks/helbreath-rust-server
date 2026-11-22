@@ -312,9 +312,11 @@ impl Game {
             c.gm_flags |= GMFLAG_INVENCIBLE | GMFLAG_NOAGGRO;
         }
         // fix: the C++ tested an uninitialised cGuildStatus here (the guild check is the guild layer's job)
-        let mut b = vec![0u8; 6];
+        // Rust only: byte 6 = is GM, so the client lists the GM spells only to GMs (older clients ignore it)
+        let mut b = vec![0u8; 7];
         W(&mut b).u32(0, MSGID_RESPONSE_INITPLAYER);
         W(&mut b).u16(4, MSGTYPE_CONFIRM as u16);
+        b[6] = c.is_gm() as u8;
         self.send(h, &b);
         self.client_mut(h).unwrap().is_init_complete = true;
         self.send_enter_game_confirm(h);

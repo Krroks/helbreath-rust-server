@@ -319,7 +319,13 @@ impl Game {
         let mut ok = true;
         let (g, gold) = self.item_count(h, b"Gold");
         let c = self.client(h).unwrap();
-        if purchase && (cost < 0 || cost as u32 > gold || (!c.is_on_tower && !c.is_neutral() && !c.is_on_shop)) {
+        // Rust only: GM spells (cost < 0): players can't learn them by any path, GMs learn them free in the shop
+        let gm_spell = cost < 0;
+        if gm_spell && !c.is_gm() {
+            ok = false;
+        }
+        let cost = cost.max(0);
+        if purchase && !gm_spell && (cost as u32 > gold || (!c.is_on_tower && !c.is_neutral() && !c.is_on_shop)) {
             ok = false;
         }
         if idx >= c.magic_mastery.len() || c.magic_mastery[idx] != 0 {
