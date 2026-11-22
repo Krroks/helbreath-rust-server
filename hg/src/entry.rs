@@ -323,6 +323,8 @@ impl Game {
         self.party_enter(h);
 
         self.send_character_contents(h);
+        let hs = self.client(h).unwrap().hunger_status;
+        self.notify(h, NOTIFY_HUNGER, &[hs], None); // the HUD hunger tube needs the value from the start
         self.send_skill_contents(h);
         self.send_item_list(h);
         self.player_map_entry(h, true);

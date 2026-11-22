@@ -423,6 +423,7 @@ impl Game {
         c.is_killed = false;
         c.hp = c.get_max_hp();
         c.hunger_status = 100;
+        self.notify(h, NOTIFY_HUNGER, &[100], None);
         self.request_teleport(h, 2, Some(dest), -1, -1);
     }
 
@@ -600,7 +601,7 @@ impl Game {
             }
             c.hunger_status = c.hunger_status.max(0);
             c.hunger_time = now;
-            if c.hp > 0 && c.hunger_status < 30 {
+            if c.hp > 0 {
                 let hs = c.hunger_status;
                 self.notify(h, NOTIFY_HUNGER, &[hs], None);
             }

@@ -174,6 +174,7 @@ impl Game {
                 let c = self.client_mut(h).unwrap();
                 c.cs.hp_stock = (c.cs.hp_stock + s).clamp(0, 500);
                 c.hunger_status = (c.hunger_status + f).clamp(0, 100);
+                result = 7;
             }
             ITEMEFFECTTYPE_STUDYSKILL => {
                 let sev1 = it.item_spec_effect_value[0] as i32;
@@ -257,6 +258,10 @@ impl Game {
             4 => self.notify(h, NOTIFY_SLATE_INVINCIBLE, &[], None),
             5 => self.notify(h, NOTIFY_SLATE_MANA, &[], None),
             6 => self.notify(h, NOTIFY_SLATE_EXP, &[], None),
+            7 => {
+                let hs = self.client(h).unwrap().hunger_status;
+                self.notify(h, NOTIFY_HUNGER, &[hs], None);
+            }
             _ => {}
         }
     }
