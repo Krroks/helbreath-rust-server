@@ -134,6 +134,7 @@ MSGID_REQUEST_ANGEL and MSGID_MANAGER_INIT / SHUTDOWN are dead (above).
 
 ## Gameplay-visible fixes (the owner decides)
 
+- CLIENTTIMEOUT_MS (silent drop of a client that sends nothing) raised from 18 s to 60 s (2026-11-22): the web client in a background tab sends its 8 s CHECKCONNECTION about once a second at best and was dropped while idle. The drop now logs `Client(name) timed out`. The same constant bounds the speed-hack time gap in `check_connection`.
 - targetSearch: monsters hunt travellers (kept, see f2368c2).
 - EnemyKillRewardHandler: `m_iEnemyKillCount + m_iEnemyKillAdjust;` had no assignment, so the C++ never raised the
   EK count; here an enemy kill at victim exp level >= 30 (80 for killers of level 80+) adds enemy-kill-adjust EKs. Kept: the owner decided (2026-11-20) that enemy kills add EKs.
@@ -1228,6 +1229,12 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   at 0 endurance), is under `repair-percent` % of its endurance and the bot has the gold; after the purchases it sends
   `COMMONTYPE_REQ_REPAIRITEMCONFIRM` for each such piece (the server only wants the bot on a shop map) and wears the repaired
   weapon again. Neutral characters never wear gear out (`is_neutral` in `combat.rs`), so this only matters after joining a town.
+- hunting grounds (`roam`, `roam-idle-ms`, `hunt-level-step`): a new character spawns far from any monster (`default`:
+  the slime spots are 40-80 tiles away, sight is 12), so with nothing to fight in sight for `roam-idle-ms` the bot picks one of
+  the 5 nearest live monsters it can beat on its map (or, if the map has none, a random one on the nearest map of this server
+  that has some, through the teleport tiles), makes that tile its new home and `Travel`s there; every 20 s at most. The bot
+  only fights monsters whose HitDice is at most `2 + level / hunt-level-step` (level 1: slimes; 12: orcs and amphis; 24:
+  scorpions; 0 = any); a monster it cannot beat is left alone in sight and in the ground search.
 Not yet: spells, fleeing on foot, parties, PvP.
 
 Test (isolated Login on other ports + a copy of `Maps/All`, same MySQL): `login --tcp-port 4100 --ws-port 4102 --gs-port 5757
@@ -1244,4 +1251,7 @@ of other kinds and surplus gear (a `ShortSword` equipped over the `Dagger`, then
 used about 15 s of CPU in 7 minutes.
 Repair run (`Nation='Aresden'`, dagger `LifeSpan=20`, `shop-potion-min = 1`): trip to `gshop_1`, spare dagger sold, 7 potions bought,
 `repairs Dagger (slot 0, 11 gold)`, back home.
+Hunting ground run (3 bots, prefix `tst`, created by the bots themselves at the `default` spawn, level 1): ~8 s without a monster, a
+ground at `default(100,85)`, 20 s walk, slimes killed in 1-3 hits; started inside `gshop_1`, they left through the teleports and
+were killing at `aresden` 40 s later.
 Remove the rows afterwards (`char_database`, `item`, `bank_item`, `skill`, `account_database` for the bot names).

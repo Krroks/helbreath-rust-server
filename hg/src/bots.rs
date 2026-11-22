@@ -83,6 +83,9 @@ pub struct BotCfg {
     pub shop_scroll_item: String,
     pub repair: bool,
     pub repair_pct: i32,
+    pub roam: bool,
+    pub roam_idle_ms: u32,
+    pub hunt_level_step: i32,
 }
 
 impl Default for BotCfg {
@@ -126,6 +129,9 @@ impl Default for BotCfg {
             shop_scroll_item: "RecallScroll".into(),
             repair: true,
             repair_pct: 30,
+            roam: true,
+            roam_idle_ms: 8000,
+            hunt_level_step: 6,
         }
     }
 }
@@ -172,6 +178,9 @@ shop-potion-item     = RedPotion  // what it buys as a potion
 shop-scroll-item     = RecallScroll
 repair               = 1          // repairs worn gear at the shop (only characters of a nation wear it out; neutral ones do not)
 repair-percent       = 30         // a trip when a worn piece is below this % of its endurance (or broke) and it can pay
+roam                 = 1          // with no monster in sight for roam-idle-ms it walks to a hunting ground (possibly through teleports)
+roam-idle-ms         = 8000
+hunt-level-step      = 6          // it fights monsters of HitDice up to 2 + level / this (0 = any): level 1 slimes, 12 orcs, 24 scorpions
 ";
 
 impl BotCfg {
@@ -221,6 +230,9 @@ impl BotCfg {
                 ("shop-bag-slots", Some(x)) => c.shop_bag_slots = x.clamp(1, 50) as usize,
                 ("shop-cooldown-ms", Some(x)) => c.shop_cooldown_ms = x.max(0) as u32,
                 ("repair-percent", Some(x)) => c.repair_pct = x.clamp(1, 99) as i32,
+                ("roam-idle-ms", Some(x)) => c.roam_idle_ms = x.max(0) as u32,
+                ("hunt-level-step", Some(x)) => c.hunt_level_step = x.clamp(0, 100) as i32,
+                ("roam", _) if flag.is_some() => c.roam = flag.unwrap(),
                 ("repair", _) if flag.is_some() => c.repair = flag.unwrap(),
                 ("loot", _) if flag.is_some() => c.loot = flag.unwrap(),
                 ("shop", _) if flag.is_some() => c.shop = flag.unwrap(),
@@ -295,6 +307,8 @@ pub struct Bot {
     last_shop: u32,
     sell_tried: Vec<(usize, u32)>,
     repair_tried: Vec<usize>,
+    idle_since: Option<u32>,
+    last_roam: u32,
     buy_fails: u32,
     last_have: u32,
     /// items on the ground: the tile it is going to, tries there, tiles to leave alone until a time
@@ -746,6 +760,7 @@ impl Game {
         }
         b.ignore.retain(|&(_, t)| now.wrapping_sub(t) as i32 <= 0);
         let tired = hp * 100 < max_hp * cfg.tired_pct;
+        let max_dice = self.bot_max_dice(h, cfg);
         // between two fights: supplies first, then what lies about, then the next monster
         if b.target == 0 && !tired && (self.bot_maybe_shop(h, b, cfg, (pos, m), now) || (cfg.loot && self.bot_loot(h, b, cfg, (pos, m), now))) {
             return;
@@ -757,7 +772,7 @@ impl Game {
             for dx in -sight..=sight {
                 for dy in -sight..=sight {
                     let (o, ot) = self.maps[m].get_owner(pos.0 + dx, pos.1 + dy);
-                    if ot == OWNERTYPE_NPC && o > 0 && !b.ignore.iter().any(|&(i, _)| i == o as usize) && self.bot_prey(o as usize, m).is_some() && dx.abs().max(dy.abs()) < best.0 {
+                    if ot == OWNERTYPE_NPC && o > 0 && !b.ignore.iter().any(|&(i, _)| i == o as usize) && self.bot_prey(o as usize, m).is_some() && self.npcs[o as usize].as_ref().is_some_and(|n| n.hit_dice <= max_dice) && dx.abs().max(dy.abs()) < best.0 {
                         best = (dx.abs().max(dy.abs()), o as usize);
                     }
                 }
@@ -766,6 +781,7 @@ impl Game {
             b.attacks = 0;
         }
         if let Some((tx, ty, reach)) = self.bot_prey(b.target, m) {
+            b.idle_since = None;
             if cheb(pos, (tx, ty)) <= reach {
                 let thp = self.npcs[b.target].as_ref().map_or(0, |n| n.hp);
                 if b.attacks == 0 {
@@ -788,6 +804,13 @@ impl Game {
                 self.bot_walk(h, b, cfg, (pos, m), (tx, ty), reach, None, cfg.path_limit, now);
             }
         } else if !tired {
+            let idle = *b.idle_since.get_or_insert(now);
+            if cfg.roam && now.wrapping_sub(idle) > cfg.roam_idle_ms && now.wrapping_sub(b.last_roam) > 20_000 {
+                b.last_roam = now;
+                if self.bot_roam(b, (pos, m), max_dice) {
+                    return;
+                }
+            }
             if b.wander.is_none_or(|w| w == pos) {
                 let r = cfg.wander_radius;
                 let (dx, dy) = (self.dice(1, 2 * r as i32 + 1) as i16 - r - 1, self.dice(1, 2 * r as i32 + 1) as i16 - r - 1);
@@ -797,6 +820,40 @@ impl Game {
                 self.bot_walk(h, b, cfg, (pos, m), w, 0, None, cfg.path_limit, now);
             }
         }
+    }
+
+    /// The highest HitDice of the monsters it fights (`hunt-level-step`): its level / step above 2, slimes at level 1.
+    fn bot_max_dice(&self, h: usize, cfg: &BotCfg) -> i32 {
+        let level = self.clients[h].as_ref().map_or(1, |c| c.level);
+        if cfg.hunt_level_step > 0 { 2 + level / cfg.hunt_level_step } else { i32::MAX }
+    }
+
+    /// Nothing to fight in sight for a while: picks a hunting ground (one of the nearest live monsters it can beat, on
+    /// this map or the nearest map of this server that has some), makes it the new home and goes there. False: none.
+    fn bot_roam(&mut self, b: &mut Bot, at: ((i16, i16), usize), max_dice: i32) -> bool {
+        let (pos, m) = at;
+        let prey: Vec<(usize, (i16, i16))> = self.npcs.iter().flatten().filter(|n| n.side >= SIDE_HOSTILE && !n.is_killed && n.hp > 0 && n.hit_dice <= max_dice).map(|n| (n.map_index, (n.x, n.y))).collect();
+        let mut here: Vec<(i16, i16)> = prey.iter().filter(|&&(pm, t)| pm == m && cheb(t, pos) > 2).map(|&(_, t)| t).collect();
+        here.sort_by_key(|&t| cheb(t, pos));
+        here.truncate(5); // several bots: not all of them to the same monster
+        let ground = if !here.is_empty() {
+            let k = self.dice(1, here.len() as i32) as usize - 1;
+            Some((m, here[k]))
+        } else {
+            let mut has = vec![false; self.maps.len()];
+            prey.iter().for_each(|&(pm, _)| has[pm] = true);
+            let d = self.bot_route(m, &|d| has[d], pos).map(|(_, d)| d);
+            let there: Vec<(i16, i16)> = prey.iter().filter(|&&(pm, _)| Some(pm) == d).map(|&(_, t)| t).collect();
+            (!there.is_empty()).then(|| (d.unwrap(), there[self.dice(1, there.len() as i32) as usize - 1]))
+        };
+        let Some((gm, gt)) = ground else {
+            log(&format!("(bot) {}: no monster it can beat on any map it can reach", b.ch));
+            return false;
+        };
+        log(&format!("(bot) {}: no monster in sight, new hunting ground {}({},{})", b.ch, String::from_utf8_lossy(&self.maps[gm].name), gt.0, gt.1));
+        (b.home, b.mode, b.no_route_logged, b.wander, b.idle_since) = (Some((gm, gt)), Mode::Travel, false, None, None);
+        b.path.clear();
+        true
     }
 
     /// Back to the home tile: through the teleport tiles of this server's maps, then walking.
