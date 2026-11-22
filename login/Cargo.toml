@@ -1,0 +1,12 @@
+[package]
+name = "login"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+proto = { path = "../proto" }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "io-std", "time", "sync"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+mysql_async = { version = "0.37", default-features = false, features = ["minimal"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
