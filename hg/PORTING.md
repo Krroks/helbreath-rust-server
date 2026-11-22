@@ -848,8 +848,8 @@ Regressions (Rust login + Rust HG): play 22/22, fight 23/23, pvp 37/37, magic 27
     hgprobe heldenian LOGIN OUT.jsonl       (examples/hgprobe/heldenian.rs; servers All + Events, a GM account)
 
 Data: no server had the heldenian maps. The Events server folder (run/server/Maps/Events: inferniaA/B, maze,
-druncncity, procella, abaddon, BtField, GodH, HRampart, port 3001) comes from the same distribution on GitHub
-(rastaunlimited/Helbreath-International-All-In-One, Maps/Events: the 10 map info .txt and GServer.cfg; the .amd
+druncncity, procella, abaddon, BtField, GodH, HRampart, port 3001) comes from the original server distribution
+(its Maps/Events: the 10 map info .txt and GServer.cfg; the .amd
 are the client's, byte-identical but GodH), with the local IPs, the HGserver.exe of All (the Towns / Middleland /
 Neutrals exes are an older build the Rust login does not understand) and the map named BtField in GServer.cfg
 (BTField there: the code, Teleport.cfg and the map info say BtField, so the C++ never put up its towers).
