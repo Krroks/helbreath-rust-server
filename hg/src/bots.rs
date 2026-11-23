@@ -100,9 +100,29 @@ pub struct BotCfg {
     pub learn_spells: bool,
     pub party: bool,
     pub pace_mix: [u32; 3],
+    pub paused: bool,
+    pub chat: bool,
+    pub flee: bool,
+    pub heal_pct: i32,
+    pub arrow_min: u32,
+    pub bow_range: i16,
+    pub flee_pct: i32,
+    pub recover: bool,
+    pub recover_high: i32,
+    pub chat_greet_pct: i32,
+    pub summary_ms: u32,
+    pub schedule: bool,
+    pub session_min: (u32, u32),
+    pub gap_min: (u32, u32),
     pub drop_pct: i32,
     pub drop_check_ms: u32,
     pub party_range: i16,
+    pub party_follow: bool,
+    pub quests: bool,
+    pub guilds: bool,
+    pub crusade: bool,
+    pub quest_minutes: u32,
+    pub move_minutes: (u32, u32),
     pub raid: bool,
     pub raid_level: i32,
     pub raid_cooldown_ms: u32,
@@ -151,7 +171,7 @@ impl Default for BotCfg {
             repair: true,
             repair_pct: 30,
             roam: true,
-            archetypes: ["warrior", "warrior", "knight", "duelist", "mage"].map(String::from).to_vec(),
+            archetypes: ["warrior", "knight", "duelist", "mage", "archer", "warrior"].map(String::from).to_vec(),
             enlist: true,
             enlist_level: 5,
             nation: "random".into(),
@@ -163,9 +183,29 @@ impl Default for BotCfg {
             learn_spells: true,
             party: true,
             pace_mix: [25, 35, 40],
+            paused: false,
+            chat: true,
+            flee: true,
+            heal_pct: 55,
+            arrow_min: 40,
+            bow_range: 7,
+            flee_pct: 25,
+            recover: true,
+            recover_high: 70,
+            chat_greet_pct: 35,
+            summary_ms: 300_000,
+            schedule: true,
+            session_min: (60, 180),
+            gap_min: (10, 90),
             drop_pct: 20,
             drop_check_ms: 90_000,
             party_range: 10,
+            party_follow: true,
+            quests: true,
+            guilds: true,
+            crusade: true,
+            quest_minutes: 8,
+            move_minutes: (20, 60),
             raid: true,
             raid_level: 10,
             raid_cooldown_ms: 600_000,
@@ -218,7 +258,7 @@ shop-potion-item     = RedPotion  // what it buys as a potion
 shop-scroll-item     = RecallScroll
 repair               = 1          // repairs worn gear at the shop (only characters of a nation wear it out; neutral ones do not)
 repair-percent       = 30         // a trip when a worn piece is below this % of its endurance (or broke) and it can pay
-bot-archetypes       = warrior,warrior,knight,duelist,mage  // comma list, bot N takes entry N (cycling). warrior: str, vit, dex, any weapon;
+bot-archetypes       = warrior,knight,duelist,mage,archer,warrior  // comma list, bot N takes entry N (cycling). warrior: str, vit, dex, any weapon;
                                   // knight: vit, str, dex, one-handed weapon and shield; duelist: dex, str, vit, one-handed weapon, no shield;
                                   // mage: int, mag, vit, empty hands once it knows an attack spell. Also the stats and looks a new character is made with
 enlist               = 1          // a neutral bot of enlist-level or more walks to its nation's city and takes the nationality
@@ -234,12 +274,35 @@ bot-pace-mix         = 25,35,40   // weights of the paces relaxed, steady and dr
                                   // blows, a pause after each kill, now and then a few minutes of standing about), middling or as fast as the other keys say
 drop-percent         = 20         // every drop-check-ms, between two fights, this % that it drops on the ground one thing it does not care about (loot
 drop-check-ms        = 90000      // it would sell, gear it will never wear); 0 = never. Other bots and players may pick it up
+bot-pause            = 0          // 1: the bots stand still (and stay connected) until it is 0 again
+summary-ms           = 300000     // one line in the log with how many bots do what, their levels and deaths, this often (0 = never)
+schedule             = 1          // a bot plays sessions: it logs off after session-minutes and comes back after gap-minutes (more of them at night)
+session-minutes      = 60,180     // least and most
+gap-minutes          = 10,90
+                                  // Bots.cfg is read again when it changes (every 5 s): bot-count, the paces, classes, timings and the rest
+                                  // take effect at once (not the Login address, account and name prefix or password)
+heal-percent         = 55         // a bot that knows a healing spell casts it on itself or a party mate below this % HP
+arrow-min            = 40         // an archer goes shopping for 100 arrows when it has fewer
+bow-range            = 7          // an archer shoots monsters up to this far
+flee                 = 1          // below flee-percent HP, with no potion or scroll left, it walks away from the monster it fights (12 steps at most)
+flee-percent         = 25
+recover              = 1          // below tired-percent HP (a mage: below 30 % mana) it stands still, away from monsters, until recover-percent
+recover-percent      = 70
+chat                 = 1          // answers a greeting, its name or a whisper from a player (not from other bots), and now and then greets one that comes close
+chat-greet-percent   = 35         // chance that it says hello to a player that comes within 6 tiles (once in 10 minutes for each)
 party                = 1          // bots of the same map and side near each other form parties (they share the exp)
 party-range          = 10
+party-follow         = 1          // the bots of a party hunt together: they follow the one with the lowest handle and fight what a mate fights
 raid                 = 1          // a citizen of raid-level or more now and then spends raid-ms in a map of the rival nation, fighting its players
 raid-level           = 10
 raid-cooldown-ms     = 600000     // least time between two raids (each check: 1 in 3)
 raid-ms              = 180000
+move-minutes         = 20,60      // now and then (about this many minutes, least and most) a bot between two fights goes to another hunting map; 0,0 = never
+quests               = 1          // a citizen of level 11 or more takes a monster-hunt quest from the city hall (any town tile), hunts it down and goes back for the reward
+quest-minutes        = 8          // least time between two quests (a quest that takes 25 minutes is cancelled)
+guilds               = 1          // citizens put points in charisma (the Login asks 20 and level 20 for a guild); the first one ready founds a guild in a town, the
+                                  // others of its nation join it (the master approves). They skip the ticket item: the server routine that giving the ticket runs is called
+crusade              = 1          // during a crusade a citizen of level 10 or more takes the fighter duty and raids the enemy more often
 roam                 = 1          // with no monster in sight for roam-idle-ms it walks to a hunting ground (possibly through teleports)
 roam-idle-ms         = 8000
 hunt-level-step      = 6          // it fights monsters of HitDice up to 2 + level / this (0 = any): level 1 slimes, 12 orcs, 24 scorpions
@@ -302,6 +365,39 @@ impl BotCfg {
                 }
                 ("drop-percent", Some(x)) => c.drop_pct = x.clamp(0, 100) as i32,
                 ("drop-check-ms", Some(x)) => c.drop_check_ms = x.max(1000) as u32,
+                ("heal-percent", Some(x)) => c.heal_pct = x.clamp(10, 95) as i32,
+                ("arrow-min", Some(x)) => c.arrow_min = x.max(0) as u32,
+                ("bow-range", Some(x)) => c.bow_range = x.clamp(2, 10) as i16,
+                ("flee-percent", Some(x)) => c.flee_pct = x.clamp(1, 90) as i32,
+                ("recover-percent", Some(x)) => c.recover_high = x.clamp(40, 100) as i32,
+                ("flee", _) if flag.is_some() => c.flee = flag.unwrap(),
+                ("recover", _) if flag.is_some() => c.recover = flag.unwrap(),
+                ("chat-greet-percent", Some(x)) => c.chat_greet_pct = x.clamp(0, 100) as i32,
+                ("chat", _) if flag.is_some() => c.chat = flag.unwrap(),
+                ("summary-ms", Some(x)) => c.summary_ms = x.max(0) as u32,
+                ("bot-pause", _) if flag.is_some() => c.paused = flag.unwrap(),
+                ("schedule", _) if flag.is_some() => c.schedule = flag.unwrap(),
+                ("session-minutes", _) | ("gap-minutes", _) => {
+                    let w: Vec<u32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                    if w.len() == 2 && w[0] >= 1 && w[0] <= w[1] {
+                        if k == "session-minutes" { c.session_min = (w[0], w[1]) } else { c.gap_min = (w[0], w[1]) }
+                    } else {
+                        warn.push(format!("{k} wants two numbers like 60,180 (least, most), got '{v}'"));
+                    }
+                }
+                ("move-minutes", _) => {
+                    let w: Vec<u32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                    if w.len() == 2 && w[0] <= w[1] {
+                        c.move_minutes = (w[0], w[1]);
+                    } else {
+                        warn.push(format!("move-minutes wants two numbers like 20,60, got '{v}'"));
+                    }
+                }
+                ("guilds", _) if flag.is_some() => c.guilds = flag.unwrap(),
+                ("crusade", _) if flag.is_some() => c.crusade = flag.unwrap(),
+                ("quest-minutes", Some(x)) => c.quest_minutes = x.max(1) as u32,
+                ("quests", _) if flag.is_some() => c.quests = flag.unwrap(),
+                ("party-follow", _) if flag.is_some() => c.party_follow = flag.unwrap(),
                 ("party-range", Some(x)) => c.party_range = x.clamp(2, 20) as i16,
                 ("raid-level", Some(x)) => c.raid_level = x.clamp(1, 180) as i32,
                 ("raid-cooldown-ms", Some(x)) => c.raid_cooldown_ms = x.max(0) as u32,
@@ -347,9 +443,9 @@ impl BotCfg {
 
 // ------------------------------------------------------------------ state
 
-/// The archetypes: warrior 0, mage 1, knight 2, duelist 3.
+/// The archetypes: warrior 0, mage 1, knight 2, duelist 3, archer 4.
 fn arch_id(name: &str) -> Option<u8> {
-    ["warrior", "mage", "knight", "duelist"].iter().position(|a| *a == name).map(|i| i as u8)
+    ["warrior", "mage", "knight", "duelist", "archer"].iter().position(|a| *a == name).map(|i| i as u8)
 }
 
 /// Archetype of bot `i` (1-based): entry `i` of `bot-archetypes`, cycling.
@@ -358,10 +454,10 @@ fn arch_of(cfg: &BotCfg, i: usize) -> u8 {
 }
 
 /// Where the three level-up points go (stat index: str 0, vit 1, dex 2, int 3, mag 4), cycling.
-const POINTS: [[usize; 4]; 4] = [[0, 1, 0, 2], [3, 4, 3, 1], [1, 0, 1, 2], [2, 0, 2, 1]];
+const POINTS: [[usize; 4]; 5] = [[0, 1, 0, 2], [3, 4, 3, 1], [1, 0, 1, 2], [2, 0, 2, 1], [2, 0, 2, 1]];
 
 /// The stats a new character starts with (str, vit, dex, int, mag, agi: 10-14 each, 70 in all).
-const START_STATS: [[u8; 6]; 4] = [[14, 12, 12, 10, 10, 12], [10, 10, 10, 14, 14, 12], [13, 14, 11, 10, 10, 12], [12, 10, 14, 10, 10, 14]];
+const START_STATS: [[u8; 6]; 5] = [[14, 12, 12, 10, 10, 12], [10, 10, 10, 14, 14, 12], [13, 14, 11, 10, 10, 12], [12, 10, 14, 10, 10, 14], [11, 10, 14, 10, 11, 14]];
 
 /// The looks a new character is made with, spread by a hash of the bot's number: gender 1-2, skin 1-3, hair style 0-7,
 /// hair colour 0-15, underwear colour 0-7.
@@ -379,16 +475,20 @@ struct Role {
     mage: bool,
     one_hand: bool,
     no_shield: bool,
+    /// an archer wears a bow and nothing else in the hands; `shoot`: it has the bow on and arrows to shoot (so it keeps no melee weapon)
+    archer: bool,
+    shoot: bool,
 }
 
-fn role_of(arch: u8, casts: bool) -> Role {
-    Role { mage: arch == 1 && casts, one_hand: arch >= 2, no_shield: arch == 3 }
+/// `ready`: a mage that knows an attack spell, an archer that wears a bow and has arrows.
+fn role_of(arch: u8, ready: bool) -> Role {
+    Role { mage: arch == 1 && ready, one_hand: matches!(arch, 2 | 3), no_shield: arch == 3, archer: arch == 4, shoot: arch == 4 && ready }
 }
 
 impl Role {
     /// Positions it will not fill.
     fn refuses(self, pos: i32) -> bool {
-        (self.mage && matches!(pos, EQUIPPOS_RHAND | EQUIPPOS_TWOHAND | EQUIPPOS_LHAND)) || (self.one_hand && pos == EQUIPPOS_TWOHAND) || (self.no_shield && pos == EQUIPPOS_LHAND)
+        (self.mage && matches!(pos, EQUIPPOS_RHAND | EQUIPPOS_TWOHAND | EQUIPPOS_LHAND)) || (self.one_hand && pos == EQUIPPOS_TWOHAND) || (self.no_shield && pos == EQUIPPOS_LHAND) || (self.archer && pos == EQUIPPOS_LHAND) || (self.shoot && pos == EQUIPPOS_RHAND)
     }
 }
 
@@ -419,6 +519,7 @@ enum Mode {
     Shop,
     Enlist,
     Raid,
+    Quest,
 }
 
 #[derive(Default)]
@@ -486,6 +587,28 @@ pub struct Bot {
     raid_target: usize,
     raid_kills: u32,
     last_level: i32,
+    /// its number (0-based), whether it was connected at the last look, when its session ends and what it is called
+    n: usize,
+    online: bool,
+    session_until: u32,
+    deaths: u32,
+    last_chat: u32,
+    last_guild: u32,
+    /// quest: 0 going to a town, 1 asking for it, 2 hunting, 3 back to hand it in; when it started, the last ask, the monster type it must kill (0 = any)
+    qphase: u8,
+    quest_start: u32,
+    last_quest: u32,
+    last_ask: u32,
+    quest_type: i32,
+    quest_asks: u32,
+    shop_cd: u32,
+    next_move: u32,
+    last_follow: u32,
+    accepts: (u32, String),
+    recovering: bool,
+    flee_steps: u32,
+    last_greet_look: u32,
+    greeted: Vec<(String, u32)>,
     last_drop_check: u32,
     /// its pace (index in PACES) and what that makes of the timings
     pace: usize,
@@ -520,38 +643,116 @@ pub struct Bots {
     pub cfg: Arc<BotCfg>,
     /// bots that were asked to put the weapons away (combat mode off) until a time: a party invitation needs it
     pub peace: Vec<(String, u32)>,
+    /// what it is going to say: bot number, whisper to (the player's name), the text, when
+    chat_q: Vec<(usize, Option<String>, String, u32)>,
+    /// to start the tasks of bots added while it runs; where the config file is, when it was last read, the next look
+    pub ev: Option<UnboundedSender<Ev>>,
+    pub cfg_path: String,
+    pub cfg_mtime: Option<std::time::SystemTime>,
+    next_reload: u32,
+    next_summary: u32,
+    /// `bots pause` from the console (the config key `bot-pause` does the same)
+    paused: bool,
+}
+
+impl Bot {
+    /// Bot number `i` (1-based) of `cfg`: its names, class and pace (the pace is a slot of 0..100 spread by a
+    /// multiplicative hash that the mix cuts), then +-15 % on each timing.
+    fn made(cfg: &BotCfg, i: usize) -> Bot {
+        let mut b = Bot { acc: format!("{}{i:02}", cfg.account_prefix), ch: format!("{}{i:02}", cfg.name_prefix), n: i - 1, ..Default::default() };
+        b.tune(cfg);
+        b
+    }
+
+    /// (Re)sets what comes from the config: class, pace and timings.
+    fn tune(&mut self, cfg: &BotCfg) {
+        let i = self.n + 1;
+        let total: u32 = cfg.pace_mix.iter().sum();
+        let slot = (i as u32).wrapping_mul(2_654_435_761) % 100 * total / 100;
+        let pace = if slot < cfg.pace_mix[0] { 0 } else if slot < cfg.pace_mix[0] + cfg.pace_mix[1] { 1 } else { 2 };
+        let p = &PACES[pace];
+        let j = |k: u32| 0.85 + (((i as u32).wrapping_mul(k).wrapping_mul(2_246_822_519) >> 8) % 31) as f32 / 100.0;
+        self.arch = arch_of(cfg, i);
+        self.pace = pace;
+        self.step_ms = ((cfg.step_ms as f32 * p.step * j(3)) as u32).max(MIN_STEP_MS);
+        self.attack_ms = ((cfg.attack_ms as f32 * p.attack * j(5)) as u32).max(MIN_ATTACK_MS);
+        self.sight = ((cfg.sight as f32 * p.sight * j(7)) as i16).clamp(4, 14);
+        self.react = p.react;
+        self.break_every = (p.break_every as f32 * j(11)) as u32;
+        self.break_len = (p.break_len as f32 * j(13)) as u32;
+    }
 }
 
 impl Bots {
     pub fn new(cfg: BotCfg) -> Bots {
-        let list = (1..=cfg.count)
-            .map(|i| {
-                // the pace: bot i takes a slot of 0..100 spread by a multiplicative hash, the mix cuts the slots
-                let total: u32 = cfg.pace_mix.iter().sum();
-                let slot = (i as u32).wrapping_mul(2_654_435_761) % 100 * total / 100;
-                let pace = if slot < cfg.pace_mix[0] { 0 } else if slot < cfg.pace_mix[0] + cfg.pace_mix[1] { 1 } else { 2 };
-                let p = &PACES[pace];
-                let j = |k: u32| 0.85 + (((i as u32).wrapping_mul(k).wrapping_mul(2_246_822_519) >> 8) % 31) as f32 / 100.0;
-                Bot {
-                    acc: format!("{}{i:02}", cfg.account_prefix),
-                    ch: format!("{}{i:02}", cfg.name_prefix),
-                    arch: arch_of(&cfg, i),
-                    pace,
-                    step_ms: ((cfg.step_ms as f32 * p.step * j(3)) as u32).max(MIN_STEP_MS),
-                    attack_ms: ((cfg.attack_ms as f32 * p.attack * j(5)) as u32).max(MIN_ATTACK_MS),
-                    sight: ((cfg.sight as f32 * p.sight * j(7)) as i16).clamp(4, 14),
-                    react: p.react,
-                    break_every: (p.break_every as f32 * j(11)) as u32,
-                    break_len: (p.break_len as f32 * j(13)) as u32,
-                    ..Default::default()
-                }
-            })
-            .collect();
-        Bots { list, cfg: Arc::new(cfg), peace: Vec::new() }
+        let list = (1..=cfg.count).map(|i| Bot::made(&cfg, i)).collect();
+        Bots { list, cfg: Arc::new(cfg), ..Default::default() }
     }
 }
 
+// ------------------------------------------------------------------ chat
+
+const HI_ES: [&str; 6] = ["hola", "buenas", "hey, que tal", "ola", "hola :)", "ey"];
+const HI_EN: [&str; 5] = ["hi", "hey", "hello", "yo", "hi there"];
+const HOW_ES: [&str; 5] = ["bien, subiendo nivel", "aqui farmeando", "tranqui, y tu?", "cazando un rato", "pues aqui, a lo mio"];
+const HOW_EN: [&str; 4] = ["good, grinding", "just hunting", "chill, you?", "levelling up"];
+const HELP_ES: [&str; 3] = ["ahora no puedo, sorry", "estoy liado", "suerte!"];
+const HELP_EN: [&str; 3] = ["cant right now, sorry", "busy atm", "good luck!"];
+const PARTY_ES: [&str; 3] = ["ahora estoy con mi grupo", "mejor otro dia", "vale, luego"];
+const PARTY_EN: [&str; 2] = ["in a party already", "maybe later"];
+const ANY_ES: [&str; 6] = ["jaja", "vale", "mm", "ni idea", "si?", "ok"];
+const ANY_EN: [&str; 5] = ["lol", "ok", "hm", "no idea", "yeah?"];
+
+/// What a player said, as the words of the text.
+fn words(text: &str) -> Vec<String> {
+    text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect()
+}
+
+/// Whether the text is English (a few common words), and which bank answers it: a greeting, a question, a call for help,
+/// an invitation to a party, or anything else; `None` when it is not for a bot that was not named or whispered to.
+fn chat_kind(text: &str, named: bool, whispered: bool) -> Option<(bool, u8)> {
+    let w = words(text);
+    let has = |l: &[&str]| w.iter().any(|t| l.contains(&t.as_str()));
+    let english = has(&["hi", "hello", "hey", "how", "what", "you", "help", "the", "are", "thanks", "party", "group", "yo"]) && !has(&["hola", "buenas", "que", "tal", "ayuda", "grupo"]);
+    let hello = has(&["hola", "buenas", "ola", "saludos", "ey", "hi", "hello", "hey", "yo", "buen"]);
+    let kind = if has(&["ayuda", "ayudame", "help", "socorro"]) {
+        2
+    } else if has(&["party", "grupo", "group", "unete", "invite"]) {
+        3
+    } else if text.contains('?') || has(&["tal", "haces", "how", "what"]) {
+        1
+    } else if hello {
+        0
+    } else {
+        4
+    };
+    (hello || named || whispered).then_some((english, kind))
+}
+
+fn pick(bank: &[&'static str], r: i32) -> &'static str {
+    bank[(r.max(1) as usize - 1) % bank.len()]
+}
+
 // ------------------------------------------------------------------ login task
+
+/// Until when (unix ms) bot `n` must not log in: its time off, or `u64::MAX` when it was taken out by `bot-count`.
+static OFFLINE: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+fn set_offline(n: usize, until: u64) {
+    let mut v = OFFLINE.lock().unwrap();
+    if v.len() <= n {
+        v.resize(n + 1, 0);
+    }
+    v[n] = until;
+}
+
+fn offline_until(n: usize) -> u64 {
+    OFFLINE.lock().unwrap().get(n).copied().unwrap_or(0)
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
 
 fn body(msgid: u32, msgtype: u16, fields: &[(&[u8], usize)], total: usize) -> Vec<u8> {
     let mut b = msgid.to_le_bytes().to_vec();
@@ -605,6 +806,9 @@ pub async fn run_bot(n: usize, cfg: Arc<BotCfg>, acc: String, ch: String, ev: Un
     tokio::time::sleep(Duration::from_millis(cfg.login_spread_ms * n as u64)).await; // spread the logins
     let pwd = cfg.password.as_bytes();
     loop {
+        while unix_ms() < offline_until(n) {
+            tokio::time::sleep(Duration::from_secs(2)).await; // its time off, or not part of the bots any more
+        }
         while !READY.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -741,6 +945,20 @@ fn c_pool(g: &Game, h: usize) -> i32 {
     g.clients[h].as_ref().map_or(0, |c| c.lu_pool.min((c.level - 1) * 3 + 70 - (c.str_ + c.vit + c.dex + c.int_ + c.mag + c.range)))
 }
 
+/// A bow in the bag, worn or not.
+fn has_bow(c: &Client) -> bool {
+    c.items.iter().flatten().any(|i| i.cfg.item_effect_type == ITEMEFFECTTYPE_ATTACK_ARROW)
+}
+
+fn arrows_of(c: &Client) -> u32 {
+    c.items.iter().flatten().filter(|i| i.cfg.item_type == crate::combat::ITEMTYPE_ARROW).map(|i| i.count).sum()
+}
+
+/// How many red potions it wants to carry at `level`: a trip below the first, a purchase up to the second.
+fn potion_wants(cfg: &BotCfg, level: i32) -> (u32, u32) {
+    (cfg.shop_potion_min + level.max(0) as u32 / 10, (cfg.shop_potion_target + level.max(0) as u32 / 2).min(60))
+}
+
 fn is_recall_scroll(it: &Item) -> bool {
     it.count > 0 && it.cfg.item_type == ITEMTYPE_USE_DEPLETE && it.cfg.item_effect_type == ITEMEFFECTTYPE_MAGIC && it.cfg.item_effect_value[0] == 1
 }
@@ -773,7 +991,7 @@ fn is_surplus(c: &Client, k: usize, it: &Item, tried: &[usize], role: Role) -> b
         return false;
     }
     let gender = if (1..=3).contains(&c.type_) { 1 } else if (4..=6).contains(&c.type_) { 2 } else { 0 };
-    if tried.contains(&k) || role.refuses(pos) || (it.cfg.gender_limit != 0 && gender != 0 && it.cfg.gender_limit != gender) {
+    if tried.contains(&k) || role.refuses(pos) || (role.archer && pos == EQUIPPOS_TWOHAND && it.cfg.item_effect_type != ITEMEFFECTTYPE_ATTACK_ARROW) || (it.cfg.gender_limit != 0 && gender != 0 && it.cfg.gender_limit != gender) {
         return true; // e.g. a mage casts with empty hands (the server refuses spells with a weapon or a shield), or it is made for the other gender
     }
     match pos {
@@ -782,7 +1000,7 @@ fn is_surplus(c: &Client, k: usize, it: &Item, tried: &[usize], role: Role) -> b
             worn.is_some_and(|w| weapon_score(it) <= w)
         }
         EQUIPPOS_LHAND => eq(pos) >= 0 || eq(EQUIPPOS_TWOHAND) >= 0,
-        EQUIPPOS_HEAD | EQUIPPOS_BODY | EQUIPPOS_ARMS | EQUIPPOS_PANTS | EQUIPPOS_LEGGINGS => eq(pos) >= 0,
+        EQUIPPOS_HEAD | EQUIPPOS_BODY | EQUIPPOS_ARMS | EQUIPPOS_PANTS | EQUIPPOS_LEGGINGS => eq(pos) >= 0 && wear_score(c, it, role).is_none(),
         _ => true,
     }
 }
@@ -818,11 +1036,20 @@ fn wear_score(c: &Client, it: &Item, role: Role) -> Option<i32> {
     }
     match pos {
         EQUIPPOS_RHAND | EQUIPPOS_TWOHAND => {
-            let worn = [EQUIPPOS_RHAND, EQUIPPOS_TWOHAND].iter().filter_map(|&p| usize::try_from(eq(p)).ok().and_then(|k| c.items.get(k)?.as_ref()).map(weapon_score)).max().unwrap_or(-1);
-            (it.cfg.item_effect_type == ITEMEFFECTTYPE_ATTACK && weapon_score(it) > worn).then(|| 1000 + weapon_score(it))
+            let held: Vec<&Item> = [EQUIPPOS_RHAND, EQUIPPOS_TWOHAND].iter().filter_map(|&p| usize::try_from(eq(p)).ok().and_then(|k| c.items.get(k)?.as_ref())).collect();
+            let worn = held.iter().map(|i| weapon_score(i)).max().unwrap_or(-1);
+            let worn_bow = held.iter().any(|i| i.cfg.item_effect_type == ITEMEFFECTTYPE_ATTACK_ARROW);
+            match it.cfg.item_effect_type {
+                // only an archer wears a bow, and it prefers one to any melee weapon: it only changes it for a better bow
+                ITEMEFFECTTYPE_ATTACK_ARROW if role.archer => (!worn_bow || weapon_score(it) > worn).then(|| 2000 + weapon_score(it)),
+                // an archer fights with a melee weapon until it has a bow, then keeps the bow
+                ITEMEFFECTTYPE_ATTACK if !worn_bow => (weapon_score(it) > worn).then(|| 1000 + weapon_score(it)),
+                _ => None,
+            }
         }
-        EQUIPPOS_HEAD | EQUIPPOS_BODY | EQUIPPOS_ARMS | EQUIPPOS_PANTS | EQUIPPOS_LEGGINGS if eq(pos) < 0 => {
+        EQUIPPOS_HEAD | EQUIPPOS_BODY | EQUIPPOS_ARMS | EQUIPPOS_PANTS | EQUIPPOS_LEGGINGS => {
             let v = &it.cfg.item_effect_value;
+            let worn = usize::try_from(eq(pos)).ok().and_then(|k| c.items.get(k)?.as_ref()).map(|i| i.cfg.item_effect_value[0]);
             let have = match v[3] {
                 10 => c.get_str(),
                 11 => c.get_dex(),
@@ -832,7 +1059,11 @@ fn wear_score(c: &Client, it: &Item, role: Role) -> Option<i32> {
                 15 => c.range,
                 _ => i32::MAX,
             };
-            (have >= v[4]).then_some(v[0])
+            // an empty slot: any piece it can wear; a worn one: a piece at least a fifth and two points better
+            (have >= v[4]).then_some(()).and_then(|_| match worn {
+                None => Some(v[0]),
+                Some(cur) => (v[0] >= cur + 2 && v[0] * 10 >= cur * 12).then_some(v[0] - cur),
+            })
         }
         EQUIPPOS_LHAND if eq(pos) < 0 && eq(EQUIPPOS_TWOHAND) < 0 => Some(0),
         _ => None,
@@ -858,13 +1089,243 @@ impl Game {
         let now = self.now();
         let think = self.bots.cfg.think_ms;
         self.bots.peace.retain(|(_, t)| now.wrapping_sub(*t) as i32 <= 0);
+        if now.wrapping_sub(self.bots.next_reload) as i32 >= 0 {
+            self.bots.next_reload = now.wrapping_add(5000);
+            self.bots_reload();
+        }
+        let summary = self.bots.cfg.summary_ms;
+        if summary > 0 && now.wrapping_sub(self.bots.next_summary) as i32 >= 0 {
+            self.bots.next_summary = now.wrapping_add(summary);
+            log(&self.bots_summary());
+        }
+        self.bots_chat_process(now);
+        let paused = self.bots.paused || self.bots.cfg.paused;
         for i in 0..self.bots.list.len() {
             if now.wrapping_sub(self.bots.list[i].next_think) as i32 >= 0 {
                 let mut b = std::mem::take(&mut self.bots.list[i]);
                 b.next_think = now.wrapping_add(think);
-                self.bot_think(&mut b, now);
+                if paused {
+                    if let Some(h) = self.bot_handle(&b.ch) {
+                        self.clients[h].as_mut().unwrap().time = now; // still connected, standing there
+                    }
+                } else {
+                    self.bot_think(&mut b, now);
+                }
                 self.bots.list[i] = b;
             }
+        }
+    }
+
+    /// Called by the chat handler for each client that receives a line (`mode` 0 normal, 20 whisper): a bot that was greeted,
+    /// named or whispered to by a player queues an answer, a few seconds later as a person types it.
+    pub fn bots_hear(&mut self, speaker: usize, listener: usize, mode: u8, d: &[u8]) {
+        if !self.bots.cfg.chat || self.bots.list.is_empty() || d.len() < 23 {
+            return;
+        }
+        let (Some(sp), Some(li)) = (self.client(speaker), self.client(listener)) else { return };
+        let prefix = self.bots.cfg.name_prefix.as_bytes();
+        let (sname, lname) = (crate::util::cstr(&sp.char_name), crate::util::cstr(&li.char_name));
+        if sname.starts_with(prefix) || !lname.starts_with(prefix) {
+            return; // bots do not talk to bots
+        }
+        let (sname, lname) = (String::from_utf8_lossy(sname).to_string(), String::from_utf8_lossy(lname).to_string());
+        let Some(n) = self.bots.list.iter().position(|b| b.ch == lname) else { return };
+        let text = String::from_utf8_lossy(crate::util::cstr(&d[21..])).to_string();
+        let whisper = mode == 20;
+        let Some((english, kind)) = chat_kind(&text, text.to_lowercase().contains(&lname.to_lowercase()), whisper) else { return };
+        if self.bots.chat_q.iter().any(|q| q.0 == n) {
+            return;
+        }
+        let r = self.dice(1, 1000);
+        let bank: &[&str] = match (kind, english) {
+            (0, false) => &HI_ES,
+            (0, true) => &HI_EN,
+            (1, false) => &HOW_ES,
+            (1, true) => &HOW_EN,
+            (2, false) => &HELP_ES,
+            (2, true) => &HELP_EN,
+            (3, false) => &PARTY_ES,
+            (3, true) => &PARTY_EN,
+            (_, false) => &ANY_ES,
+            (_, true) => &ANY_EN,
+        };
+        let now = self.now();
+        let delay = [4000, 2000, 1000][self.bots.list[n].pace] + self.dice(1, 3500) as u32; // the slow ones take longer to type
+        self.bots.chat_q.push((n, whisper.then_some(sname), pick(bank, r).to_string(), now.wrapping_add(delay)));
+    }
+
+    /// The bot says `text` (nearby, or as a whisper to `to`): the same frame a client sends, through the chat handler.
+    fn bot_say(&mut self, h: usize, to: Option<&str>, text: &str) {
+        let Some(c) = self.clients[h].as_ref() else { return };
+        let mut f = vec![0u8; 22 + text.len().min(80)];
+        let mut w = W(&mut f);
+        w.u32(0, MSGID_COMMAND_CHATMSG);
+        w.u16(6, c.x as u16);
+        w.u16(8, c.y as u16);
+        w.bytes(10, &Game::pad10(&c.char_name));
+        w.bytes(21, &text.as_bytes()[..text.len().min(80)]);
+        let to_h = to.and_then(|n| self.handles().into_iter().find(|&i| self.clients[i].as_ref().is_some_and(|o| crate::util::cstr(&o.char_name) == n.as_bytes())));
+        if to.is_some() && to_h.is_none() {
+            return; // it logged off meanwhile
+        }
+        if let Some(j) = to_h {
+            let name = self.clients[j].as_ref().unwrap().char_name.clone();
+            let c = self.clients[h].as_mut().unwrap();
+            (c.whisper_player_index, c.whisper_player_name) = (j as i32, crate::util::cstr(&name).to_vec());
+        }
+        self.chat_msg(h, &f);
+        if let Some(c) = self.clients[h].as_mut() {
+            (c.whisper_player_index, c.whisper_player_name) = (-1, Vec::new());
+        }
+    }
+
+    /// The answers that are due, and the greeting of a player that comes close.
+    fn bots_chat_process(&mut self, now: u32) {
+        let mut i = 0;
+        while i < self.bots.chat_q.len() {
+            if now.wrapping_sub(self.bots.chat_q[i].3) as i32 >= 0 {
+                let (n, to, text, _) = self.bots.chat_q.remove(i);
+                let ch = self.bots.list[n].ch.clone();
+                if let Some(h) = self.bot_handle(&ch) {
+                    let last = self.bots.list[n].last_chat;
+                    if now.wrapping_sub(last) > 6000 {
+                        self.bots.list[n].last_chat = now;
+                        log(&format!("(bot) {ch}: says{} '{text}'", to.as_ref().map_or(String::new(), |t| format!(" to {t}"))));
+                        self.bot_say(h, to.as_deref(), &text);
+                    } else {
+                        // it spoke a moment ago: it waits (nobody types two lines in a second)
+                        self.bots.chat_q.insert(i, (n, to, text, last.wrapping_add(6500)));
+                        i += 1;
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// A player (not a bot) within 6 tiles that it has not greeted in 10 minutes: maybe a hello.
+    fn bot_greet(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, now: u32) {
+        if !cfg.chat || now.wrapping_sub(b.last_greet_look) < 2500 || now.wrapping_sub(b.last_chat) < 20_000 {
+            return;
+        }
+        b.last_greet_look = now;
+        b.greeted.retain(|(_, t)| now.wrapping_sub(*t) < 600_000);
+        let Some(c) = self.clients[h].as_ref() else { return };
+        let (pos, m) = ((c.x, c.y), c.map_index);
+        let near = self.handles().into_iter().filter(|&j| j != h).find_map(|j| {
+            let o = self.clients[j].as_ref()?;
+            let name = String::from_utf8_lossy(crate::util::cstr(&o.char_name)).to_string();
+            (o.map_index == m && !o.is_killed && cheb(pos, (o.x, o.y)) <= 6 && !name.starts_with(&cfg.name_prefix) && !b.greeted.iter().any(|(g, _)| *g == name)).then_some(name)
+        });
+        if let Some(name) = near {
+            b.greeted.push((name, now));
+            if self.dice(1, 100) <= cfg.chat_greet_pct && !self.bots.chat_q.iter().any(|q| q.0 == b.n) {
+                let bank: &[&str] = if self.dice(1, 2) == 1 { &HI_ES } else { &HI_EN };
+                let r = self.dice(1, 1000);
+                let delay = [3000, 1500, 800][b.pace] + self.dice(1, 2500) as u32;
+                self.bots.chat_q.push((b.n, None, pick(bank, r).to_string(), now.wrapping_add(delay)));
+            }
+        }
+    }
+
+    /// Reads Bots.cfg again when its time changed: the new values replace the old ones at once, bots are added (their tasks
+    /// started) or taken out (they log off) to match `bot-count`.
+    fn bots_reload(&mut self) {
+        let path = self.bots.cfg_path.clone();
+        if path.is_empty() {
+            return;
+        }
+        let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return };
+        if self.bots.cfg_mtime == Some(mtime) {
+            return;
+        }
+        let first = self.bots.cfg_mtime.is_none();
+        self.bots.cfg_mtime = Some(mtime);
+        if first {
+            return; // what main.rs read at the start
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        let (mut cfg, warnings) = BotCfg::parse(&text);
+        for w in warnings {
+            log(&format!("(!) {path}: {w}"));
+        }
+        let old = Arc::clone(&self.bots.cfg);
+        // what the running tasks were started with does not change
+        (cfg.login, cfg.account_prefix, cfg.name_prefix, cfg.password, cfg.login_spread_ms, cfg.relogin_ms) = (old.login.clone(), old.account_prefix.clone(), old.name_prefix.clone(), old.password.clone(), old.login_spread_ms, old.relogin_ms);
+        let cfg = Arc::new(cfg);
+        for b in self.bots.list.iter_mut() {
+            b.tune(&cfg);
+        }
+        if let Some(ev) = self.bots.ev.clone() {
+            while self.bots.list.len() < cfg.count {
+                let b = Bot::made(&cfg, self.bots.list.len() + 1);
+                tokio::spawn(run_bot(b.n, Arc::clone(&cfg), b.acc.clone(), b.ch.clone(), ev.clone()));
+                self.bots.list.push(b);
+            }
+        }
+        for n in 0..cfg.count.min(self.bots.list.len()) {
+            if offline_until(n) == u64::MAX {
+                set_offline(n, 0); // taken out before, back in now
+            }
+        }
+        log(&format!("(*) {path} read again: {} bots wanted, {} known{}", cfg.count, self.bots.list.len(), if cfg.paused { ", paused" } else { "" }));
+        self.bots.cfg = cfg;
+    }
+
+    /// One line: who is connected and what they do.
+    pub fn bots_summary(&self) -> String {
+        let mut modes = [0u32; 8];
+        let (mut online, mut lv_sum, mut lv_min, mut lv_max, mut kills, mut deaths, mut gold) = (0u32, 0i64, i32::MAX, 0, 0u32, 0u32, 0i64);
+        for b in &self.bots.list {
+            kills += b.kills;
+            deaths += b.deaths;
+            let Some(h) = self.bot_handle(&b.ch) else { continue };
+            let c = self.clients[h].as_ref().unwrap();
+            online += 1;
+            lv_sum += c.level as i64;
+            (lv_min, lv_max) = (lv_min.min(c.level), lv_max.max(c.level));
+            gold += self.item_count(h, b"Gold").1 as i64;
+            modes[b.mode as usize] += 1;
+        }
+        let n = online.max(1) as i64;
+        format!(
+            "(bots) {online}/{} connected{}: hunting {}, resting {}, travelling {}, shopping {}, enlisting {}, raiding {}, on quests {} | level {}-{} (avg {}) | {kills} kills, {deaths} deaths | {} gold each on average",
+            self.bots.list.len(),
+            if self.bots.paused || self.bots.cfg.paused { " (paused)" } else { "" },
+            modes[0],
+            modes[1],
+            modes[2],
+            modes[3],
+            modes[4],
+            modes[5],
+            modes[6],
+            if online > 0 { lv_min } else { 0 },
+            lv_max,
+            lv_sum / n,
+            gold / n
+        )
+    }
+
+    /// The console: `bots status | pause | resume | count N | reload`.
+    pub fn bots_command(&mut self, args: &str) {
+        let mut t = args.split_whitespace();
+        match (t.next(), t.next().and_then(|n| n.parse::<usize>().ok())) {
+            (Some("status") | None, _) => log(&self.bots_summary()),
+            (Some("pause"), _) => (self.bots.paused, ) = (true, ),
+            (Some("resume"), _) => (self.bots.paused, ) = (false, ),
+            (Some("reload"), _) => self.bots.cfg_mtime = Some(std::time::UNIX_EPOCH),
+            (Some("count"), Some(n)) => {
+                let mut cfg = (*self.bots.cfg).clone();
+                cfg.count = n;
+                self.bots.cfg = Arc::new(cfg);
+                self.bots.cfg_mtime = Some(std::time::UNIX_EPOCH); // the reload adds the bots
+                log(&format!("(*) bots: count {n} (Bots.cfg is read again; edit it too or the file wins)"));
+            }
+            _ => log("(!) bots: status | pause | resume | count N | reload"),
+        }
+        if matches!(args.split_whitespace().next(), Some("pause" | "resume")) {
+            log(&format!("(*) bots {}", if self.bots.paused { "paused" } else { "resumed" }));
         }
     }
 
@@ -886,7 +1347,37 @@ impl Game {
 
     fn bot_think(&mut self, b: &mut Bot, now: u32) {
         let cfg = Arc::clone(&self.bots.cfg);
-        let Some(h) = self.bot_handle(&b.ch) else { return };
+        let Some(h) = self.bot_handle(&b.ch) else {
+            b.online = false;
+            return;
+        };
+        if b.n >= cfg.count {
+            log(&format!("(bot) {}: taken out (bot-count {}), logging off", b.ch, cfg.count));
+            set_offline(b.n, u64::MAX);
+            self.delete_client(h, true, true, true, false);
+            b.online = false;
+            return;
+        }
+        if !b.online {
+            // just connected: it starts afresh where the game put it (a first session is cut short at random so that they do not all leave at once)
+            b.online = true;
+            (b.mode, b.target, b.home, b.wander, b.idle_since, b.invite) = (Mode::Hunt, 0, None, None, None, None);
+            b.path.clear();
+            let span = self.dice(cfg.session_min.0 as i32, cfg.session_min.1 as i32).max(1) as u32 * 60_000;
+            let cut = if b.last_level == 0 { 20 + self.dice(1, 80) as u32 } else { 100 };
+            b.session_until = now.wrapping_add(span / 100 * cut);
+        }
+        if cfg.schedule && now.wrapping_sub(b.session_until) as i32 >= 0 && matches!(b.mode, Mode::Hunt | Mode::Rest | Mode::Travel) && b.target == 0 {
+            let hour = crate::chrono_now().hour;
+            // more of them at night (20-1 h), fewer in the morning
+            let f = match hour { 20..=23 | 0..=1 => 0.5, 2..=8 => 1.6, _ => 1.0 };
+            let gap = ((self.dice(cfg.gap_min.0 as i32, cfg.gap_min.1 as i32).max(1) as f32 * f) as u64).max(1) * 60_000;
+            log(&format!("(bot) {}: logs off for {} min", b.ch, gap / 60_000));
+            set_offline(b.n, unix_ms() + gap);
+            self.delete_client(h, true, true, true, false);
+            b.online = false;
+            return;
+        }
         let c = self.clients[h].as_mut().unwrap();
         c.time = now; // the keep-alive a connection would give (check_client_response_time kicks after 18 s)
         if c.is_killed {
@@ -895,6 +1386,7 @@ impl Game {
                 let mut f = vec![0u8; 6];
                 W(&mut f).u32(0, MSGID_REQUEST_RESTART);
                 self.bot_send(h, f);
+                b.deaths += 1;
                 log(&format!("(bot) {} died, restarting", b.ch));
             }
             (b.mode, b.target) = (Mode::Rest, 0);
@@ -910,6 +1402,7 @@ impl Game {
             log(&format!("(bot) {}: level {} ({} exp, {})", b.ch, c.level, c.exp, if c.is_neutral() { "neutral" } else { "citizen" }));
             b.last_level = c.level;
         }
+        self.bot_greet(h, b, &cfg, now);
         let (home_map, home) = *b.home.get_or_insert((m, pos));
         if pos != b.last_pos {
             (b.last_pos, b.stuck) = (pos, 0);
@@ -927,6 +1420,7 @@ impl Game {
             log(&format!("(bot) {}: {:?} {}({},{}) hp {hp}/{max_hp} target {} kills {}", b.ch, b.mode, String::from_utf8_lossy(&self.maps[m].name), pos.0, pos.1, b.target, b.kills));
         }
         self.bot_party(h, b, &cfg, now);
+        self.bot_guild(h, b, &cfg, now);
         if b.stuck > 25 {
             // 25 steps sent from the same tile: give up on this target and route
             if b.target != 0 {
@@ -958,6 +1452,7 @@ impl Game {
             Mode::Shop => self.bot_shop(h, b, &cfg, (pos, m), now),
             Mode::Enlist => self.bot_enlist(h, b, &cfg, (pos, m), now),
             Mode::Raid => self.bot_raid(h, b, &cfg, (pos, m), (hp, max_hp), now),
+            Mode::Quest => self.bot_quest(h, b, &cfg, (pos, m), (hp, max_hp), home, now),
         }
     }
 
@@ -1000,6 +1495,9 @@ impl Game {
     /// Hurt: a red potion; nearly dead with none left: the recall scroll. True: it did one (the turn is spent).
     fn bot_survive(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, pos: (i16, i16), hp: (i32, i32), now: u32) -> bool {
         let (hp, max_hp) = hp;
+        if self.bot_heal(h, b, cfg, pos, now) {
+            return true;
+        }
         let potion = if cfg.use_potions { self.bot_slot(h, is_potion) } else { None };
         if let Some(k) = potion.filter(|_| hp * 100 < cfg.potion_pct * max_hp && now.wrapping_sub(b.last_potion) >= 1200) {
             b.last_potion = now;
@@ -1024,11 +1522,25 @@ impl Game {
     fn bot_party(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, now: u32) {
         let Some(c) = self.clients[h].as_ref() else { return };
         let pos = (c.x, c.y);
+        if c.req_join_party_h != 0 {
+            // a request nobody is waiting for any more (the asker is in the party, or gone): forget it, the server never clears it
+            let asker = self.clients[c.req_join_party_h].as_ref();
+            if asker.is_none_or(|o| o.party_status != PARTYSTATUS_PROCESSING || o.req_join_party_h != h) {
+                let c = self.clients[h].as_mut().unwrap();
+                (c.req_join_party_h, c.req_join_party_name) = (0, Vec::new());
+                return;
+            }
+        }
+        let Some(c) = self.clients[h].as_ref() else { return };
         if c.req_join_party_h != 0 && c.party_status != PARTYSTATUS_PROCESSING {
             if now.wrapping_sub(b.last_accept) > 1500 && crate::util::cstr(&c.req_join_party_name).starts_with(cfg.name_prefix.as_bytes()) {
+                let from = String::from_utf8_lossy(crate::util::cstr(&c.req_join_party_name)).to_string();
+                b.accepts = if now.wrapping_sub(b.last_accept) < 6000 && b.accepts.1 == from { (b.accepts.0 + 1, from.clone()) } else { (1, from.clone()) };
                 b.last_accept = now;
-                log(&format!("(bot) {}: accepts the party of {}", b.ch, String::from_utf8_lossy(crate::util::cstr(&c.req_join_party_name))));
-                self.bot_send(h, common(COMMONTYPE_REQUEST_ACCEPTJOINPARTY, pos, 1));
+                // the same request again and again: the server did not take the first answers (a full party): it answers no
+                let yes = b.accepts.0 <= 3;
+                log(&format!("(bot) {}: {} the party of {from}", b.ch, if yes { "accepts" } else { "turns down" }));
+                self.bot_send(h, common(COMMONTYPE_REQUEST_ACCEPTJOINPARTY, pos, yes as u32));
             }
             return;
         }
@@ -1071,20 +1583,293 @@ impl Game {
         }
     }
 
+    /// Guilds among the bots (`guilds`): a master approves the join requests of bots of its side; a guildless citizen asks to
+    /// join the master of its side, or, when there is none and it can (level 20, charisma 20, standing in a town), founds
+    /// one. Crusade: during one it takes the fighter duty.
+    fn bot_guild(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, now: u32) {
+        let Some(c) = self.clients[h].as_ref() else { return };
+        if c.is_neutral() || c.is_killed || now.wrapping_sub(b.last_guild) < 4000 {
+            return;
+        }
+        let (pos, side, rank, level, chr, in_town, me) = ((c.x, c.y), c.side, c.guild_rank, c.level, c.range, c.is_on_town_nonpk, Game::pad10(&c.char_name));
+        b.last_guild = now;
+        let prefix = cfg.name_prefix.as_bytes();
+        let is_bot = |g: &Game, j: usize| g.clients[j].as_ref().is_some_and(|o| crate::util::cstr(&o.char_name).starts_with(prefix));
+        if cfg.crusade && self.cr.mode && level >= 10 && c.crusade_duty == 0 {
+            log(&format!("(bot) {}: a crusade is on: takes the fighter duty", b.ch));
+            self.bot_send(h, common(COMMONTYPE_REQUEST_SELECTCRUSADEDUTY, pos, 1));
+            return;
+        }
+        if !cfg.guilds {
+            return;
+        }
+        if rank == 0 {
+            // the master: whoever asked it and still qualifies
+            let asker = self.handles().into_iter().filter(|&j| is_bot(self, j)).find(|&j| self.clients[j].as_ref().is_some_and(|o| o.guild_request == Some((crate::guild::GuildReq::Join, me))));
+            if let Some(j) = asker {
+                let name = self.clients[j].as_ref().unwrap().char_name.clone();
+                log(&format!("(bot) {}: approves {} into its guild", b.ch, String::from_utf8_lossy(crate::util::cstr(&name))));
+                let mut f = common(COMMONTYPE_JOINGUILDAPPROVE, pos, 0);
+                W(&mut f).bytes(23, &name);
+                self.bot_send(h, f);
+            }
+            return;
+        }
+        if rank != -1 || level < 10 || now.wrapping_sub(b.last_ask) < 60_000 && b.last_ask != 0 {
+            return;
+        }
+        let master = self.handles().into_iter().find(|&j| j != h && is_bot(self, j) && self.clients[j].as_ref().is_some_and(|o| o.guild_rank == 0 && o.side == side));
+        if let Some(j) = master {
+            b.last_ask = now.max(1);
+            let mname = String::from_utf8_lossy(crate::util::cstr(&self.clients[j].as_ref().unwrap().char_name)).to_string();
+            if self.guild_ticket(h, j, crate::guild::ITEM_GUILDADMISSIONTICKET) {
+                log(&format!("(bot) {}: asks to join the guild of {mname}", b.ch));
+            }
+            return;
+        }
+        // one founder at a time: another bot of its side that already has a name in the making (the creation is not answered yet) holds it back
+        let founding = self.handles().into_iter().any(|j| j != h && is_bot(self, j) && self.clients[j].as_ref().is_some_and(|o| o.side == side && o.guild_rank == -1 && !o.guild_name.is_empty() && !o.guild_name.starts_with(b"NONE")));
+        if level >= 20 && chr >= 20 && in_town && !founding {
+            let names: [&str; 3] = if side == ARESDEN { ["Vanguard", "Ironwall", "Dawnblades"] } else { ["Silverleaf", "Moonguard", "Wolfpack"] };
+            let name = names[(b.n) % 3];
+            log(&format!("(bot) {}: founds the guild {name}", b.ch));
+            let mut f = vec![0u8; 57];
+            W(&mut f).u32(0, MSGID_REQUEST_CREATENEWGUILD);
+            W(&mut f).bytes(36, name.as_bytes());
+            b.last_ask = now.max(1);
+            self.bot_send(h, f);
+        }
+    }
+
+    /// The bot of its party with the lowest handle (the one the others follow), if that is not itself.
+    fn bot_party_leader(&self, h: usize) -> Option<usize> {
+        let pid = self.clients[h].as_ref()?.party_id;
+        if pid == 0 {
+            return None;
+        }
+        let prefix = self.bots.cfg.name_prefix.as_bytes();
+        let leader = self.party_members(pid).into_iter().filter(|&j| self.clients[j].as_ref().is_some_and(|o| crate::util::cstr(&o.char_name).starts_with(prefix))).min()?;
+        (leader != h).then_some(leader)
+    }
+
+    /// A party mate (not the leader) too far from the leader, or on another map, goes to the leader's tile (when the leader is
+    /// hunting): the group stays together. True: it set off.
+    fn bot_follow(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), now: u32) -> bool {
+        if !cfg.party_follow || now.wrapping_sub(b.last_follow) < 5000 {
+            return false;
+        }
+        let Some(l) = self.bot_party_leader(h) else { return false };
+        let Some(lc) = self.clients[l].as_ref() else { return false };
+        let (lname, lm, lpos) = (String::from_utf8_lossy(crate::util::cstr(&lc.char_name)).to_string(), lc.map_index, (lc.x, lc.y));
+        let leader_hunts = !lc.is_killed && self.bots.list.iter().any(|x| x.ch == lname && x.mode == Mode::Hunt);
+        let (pos, m) = at;
+        if !leader_hunts || (lm == m && cheb(pos, lpos) <= 12) {
+            return false;
+        }
+        b.last_follow = now;
+        log(&format!("(bot) {}: goes to its party leader {lname} ({}({},{}))", b.ch, String::from_utf8_lossy(&self.maps[lm].name), lpos.0, lpos.1));
+        (b.home, b.mode, b.no_route_logged, b.wander, b.idle_since, b.target) = (Some((lm, lpos)), Mode::Travel, false, None, None, 0);
+        b.path.clear();
+        true
+    }
+
+    /// The monster a party mate is fighting (a bot's target on this map within `r` tiles), if there is one: the group fights together.
+    fn bot_assist(&self, h: usize, m: usize, pos: (i16, i16), r: i16, ignore: &[(usize, u32)]) -> Option<usize> {
+        let pid = self.clients[h].as_ref()?.party_id;
+        if pid == 0 {
+            return None;
+        }
+        self.party_members(pid).into_iter().filter(|&j| j != h).find_map(|j| {
+            let name = String::from_utf8_lossy(crate::util::cstr(&self.clients[j].as_ref()?.char_name)).to_string();
+            let t = self.bots.list.iter().find(|x| x.ch == name)?.target;
+            let (tx, ty, _) = self.bot_prey(t, m)?;
+            (t != 0 && cheb(pos, (tx, ty)) <= r && !ignore.iter().any(|&(i, _)| i == t)).then_some(t)
+        })
+    }
+
+    /// A citizen of level 11 or more with no quest, after the cool-down and once in two looks, goes to a town for one (or goes
+    /// on with the one it has).
+    fn bot_maybe_quest(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, now: u32) -> bool {
+        let Some(c) = self.clients[h].as_ref() else { return false };
+        if !cfg.quests || c.is_neutral() || c.level < 11 || (b.last_quest != 0 && now.wrapping_sub(b.last_quest) < cfg.quest_minutes * 60_000) {
+            return false;
+        }
+        let has = c.quest != 0;
+        if b.last_quest == 0 {
+            b.last_quest = now.max(1); // the first look comes one cool-down after it logs in
+            if !has {
+                return false;
+            }
+        } else {
+            b.last_quest = now.max(1);
+            if !has && self.dice(1, 2) != 1 {
+                return false;
+            }
+        }
+        log(&format!("(bot) {}: {}", b.ch, if has { "goes on with its quest" } else { "goes to the city hall for a quest" }));
+        (b.mode, b.qphase, b.quest_start, b.quest_type, b.quest_asks, b.target, b.no_route_logged) = (Mode::Quest, if has { 2 } else { 0 }, now, 0, 0, 0, false);
+        b.path.clear();
+        true
+    }
+
+    /// The quest: a town tile (the city hall answers anywhere in town), ask, accept, kill what it asks on the map it names,
+    /// back to town to hand it in. A quest that is not a monster hunt, one it cannot win, or one that takes too long is cancelled.
+    fn bot_quest(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), hp: (i32, i32), home: (i16, i16), now: u32) {
+        let (pos, m) = at;
+        let Some(c) = self.clients[h].as_ref() else { return };
+        let (quest, asked, done, in_town, side) = (c.quest, c.asked_quest, c.is_quest_completed, c.is_on_town_nonpk, c.side);
+        let end = |g: &mut Game, b: &mut Bot, why: &str, cancel: bool| {
+            log(&format!("(bot) {}: quest over: {why}", b.ch));
+            if cancel {
+                g.bot_send(h, common(COMMONTYPE_REQUEST_CANCELQUEST, pos, 0));
+            }
+            (b.mode, b.qphase, b.quest_type, b.no_route_logged, b.last_quest) = (Mode::Travel, 0, 0, false, now.max(1));
+            b.path.clear();
+        };
+        if now.wrapping_sub(b.quest_start) > 25 * 60_000 {
+            end(self, b, "it takes too long", true);
+            return;
+        }
+        let towns: Vec<bool> = self.maps.iter().map(|mp| mp.name == SIDE_MAP[side.clamp(0, 3) as usize]).collect();
+        match b.qphase {
+            0 | 3 => {
+                // to a town of its nation
+                if !in_town {
+                    if !self.bot_goto(h, b, cfg, at, &|d| towns[d], now) && !b.no_route_logged {
+                        b.no_route_logged = true;
+                        end(self, b, "no way to a town", quest != 0);
+                    }
+                    return;
+                }
+                if now.wrapping_sub(b.last_ask) < 2500 {
+                    return;
+                }
+                b.last_ask = now;
+                if b.qphase == 3 {
+                    if quest == 0 {
+                        end(self, b, "reward collected", false);
+                        return;
+                    }
+                    // the reward goes into the bag: with no free slot it is not paid (and could be asked again), so it makes room first
+                    let role = self.bot_role(h, b);
+                    let full = self.clients[h].as_ref().is_some_and(|c| c.items.iter().all(|i| i.is_some()));
+                    if full {
+                        let c = self.clients[h].as_ref().unwrap();
+                        let k = junk_slots(c, b, role, now).first().copied().or_else(|| c.items.iter().enumerate().rposition(|(k, i)| i.as_ref().is_some_and(|i| !is_potion(i) && !is_recall_scroll(i) && i.cfg.name.get(..4) != Some(b"Gold") && c.equip_status.get(i.cfg.equip_pos as usize) != Some(&(k as i16)))));
+                        if let Some(k) = k {
+                            self.bot_drop_slot(h, b, k, pos);
+                            b.loot_skip.push((pos, now.wrapping_add(600_000)));
+                            return;
+                        }
+                    }
+                    b.quest_asks += 1;
+                    if b.quest_asks > 4 {
+                        end(self, b, "the city hall would not pay", true);
+                        return;
+                    }
+                    self.bot_send(h, common(COMMONTYPE_TALKTONPC, pos, 4)); // the reward
+                    return;
+                }
+                b.qphase = 1;
+                b.quest_asks = 0;
+            }
+            1 => {
+                if quest != 0 {
+                    b.qphase = 2;
+                    return;
+                }
+                if now.wrapping_sub(b.last_ask) < 2500 {
+                    return;
+                }
+                b.last_ask = now;
+                b.quest_asks += 1;
+                if b.quest_asks > 4 {
+                    end(self, b, "the city hall has no quest for it", false);
+                    return;
+                }
+                if asked != 0 {
+                    self.bot_send(h, common(COMMONTYPE_QUESTACCEPTED, pos, 0));
+                } else {
+                    self.bot_send(h, common(COMMONTYPE_TALKTONPC, pos, 4));
+                }
+            }
+            _ => {
+                if quest == 0 {
+                    end(self, b, "the quest is gone", false);
+                    return;
+                }
+                if done {
+                    log(&format!("(bot) {}: quest done, back to town for the reward", b.ch));
+                    (b.qphase, b.quest_asks, b.quest_type) = (3, 0, 0);
+                    return;
+                }
+                let Some(q) = self.quest_cfg(quest) else { return end(self, b, "unknown quest", true) };
+                if q.ty != crate::quest::QUESTTYPE_MONSTERHUNT {
+                    end(self, b, "not a monster hunt", true);
+                    return;
+                }
+                let target_map = self.map_index(crate::util::cstr(&q.target_name));
+                let strongest = self.npcs.iter().flatten().filter(|n| n.type_ as i32 == q.target_type).map(|n| n.hit_dice).max();
+                let max_dice = self.bot_max_dice(h, cfg);
+                if target_map.is_none() || strongest.is_none_or(|d| d > max_dice + 2) {
+                    end(self, b, "the monsters it names are too strong or not on this server", true);
+                    return;
+                }
+                if b.quest_type != q.target_type {
+                    log(&format!("(bot) {}: quest {quest}: kill {} of type {} on {} ({} of them alive there)", b.ch, q.max_count, q.target_type, String::from_utf8_lossy(crate::util::cstr(&q.target_name)), self.npcs.iter().flatten().filter(|n| Some(n.map_index) == target_map && n.type_ as i32 == q.target_type && !n.is_killed).count()));
+                }
+                b.quest_type = q.target_type;
+                let alive = self.npcs.iter().flatten().any(|n| Some(n.map_index) == target_map && n.type_ as i32 == q.target_type && !n.is_killed && n.hp > 0);
+                if !alive {
+                    end(self, b, "none of that kind alive on the quest map", true);
+                    return;
+                }
+                if Some(m) != target_map {
+                    let tm = target_map.unwrap();
+                    if !self.bot_goto(h, b, cfg, at, &|d| d == tm, now) {
+                        end(self, b, "no way to the quest map", true);
+                    }
+                    return;
+                }
+                // on the map: fight what is in sight, else walk to the nearest of the kind
+                let seen = self.bot_prey_of_type(m, pos, b.sight, q.target_type);
+                if seen.is_some() || b.target != 0 {
+                    self.bot_hunt(h, b, cfg, (pos, m, hp.0, hp.1), home, now);
+                } else if let Some((tx, ty)) = self.npcs.iter().flatten().filter(|n| n.map_index == m && n.type_ as i32 == q.target_type && !n.is_killed && n.hp > 0).map(|n| (n.x, n.y)).min_by_key(|&t| cheb(t, pos)) {
+                    self.bot_walk(h, b, cfg, at, (tx, ty), 1, None, (cheb(pos, (tx, ty)) + 8).clamp(30, 250), now);
+                } else {
+                    end(self, b, "none of them left on the map", true);
+                }
+            }
+        }
+    }
+
+    /// A live monster of type `ty` within `r` tiles.
+    fn bot_prey_of_type(&self, m: usize, pos: (i16, i16), r: i16, ty: i32) -> Option<usize> {
+        (-r..=r).find_map(|dx| {
+            (-r..=r).find_map(|dy| {
+                let (o, ot) = self.maps[m].get_owner(pos.0 + dx, pos.1 + dy);
+                (ot == OWNERTYPE_NPC && o > 0 && self.bot_prey(o as usize, m).is_some() && self.npcs[o as usize].as_ref().is_some_and(|n| n.type_ as i32 == ty)).then_some(o as usize)
+            })
+        })
+    }
+
     /// Now and then (cool-down, then 1 in 3 per check) a citizen of `raid-level` goes to a map where players of the rival
     /// nation are (also one of its own maps: defending it), or else to one of the rival's maps where attacking is allowed.
     fn bot_maybe_raid(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), hp: (i32, i32), now: u32) -> bool {
         let Some(c) = self.clients[h].as_ref() else { return false };
-        if !cfg.raid || c.is_neutral() || c.level < cfg.raid_level || hp.0 * 10 < hp.1 * 8 || (b.last_raid != 0 && now.wrapping_sub(b.last_raid) < cfg.raid_cooldown_ms) {
+        let war = cfg.crusade && self.cr.mode;
+        let cooldown = if war { cfg.raid_cooldown_ms.min(60_000) } else { cfg.raid_cooldown_ms };
+        if !cfg.raid || c.is_neutral() || c.level < (if war { 10 } else { cfg.raid_level }) || hp.0 * 10 < hp.1 * 8 || (b.last_raid != 0 && now.wrapping_sub(b.last_raid) < cooldown) {
             return false;
         }
         if b.last_raid == 0 {
             b.last_raid = now.max(1); // the first look comes one cool-down after it logs in (its side is known by then)
             return false;
         }
-        b.last_raid = now.wrapping_sub(cfg.raid_cooldown_ms).wrapping_add(60_000); // not this time: look again in a minute
+        b.last_raid = now.wrapping_sub(cooldown).wrapping_add(60_000); // not this time: look again in a minute
         let enemy = if c.side == ARESDEN { ELVINE } else { ARESDEN };
-        if self.dice(1, 3) != 1 {
+        if self.dice(1, if war { 1 } else { 3 }) != 1 {
             return false;
         }
         let (pos, m) = at;
@@ -1144,6 +1929,25 @@ impl Game {
             b.raid_target = best.map_or(0, |(_, j)| j);
         }
         if let Some((tx, ty)) = alive(self, b.raid_target) {
+            if self.bot_role(h, b).shoot && cheb(pos, (tx, ty)) <= cfg.bow_range {
+                let thp = self.npcs[b.target].as_ref().map_or(0, |n| n.hp);
+                if b.attacks == 0 {
+                    b.target_hp0 = thp;
+                }
+                if b.attacks >= cfg.giveup_hits * 2 && thp * 100 > b.target_hp0 * cfg.giveup_pct {
+                    log(&format!("(bot) {}: giving up on npc {} ({thp}/{} HP after {} arrows)", b.ch, b.target, b.target_hp0, b.attacks));
+                    b.ignore.push((b.target, now.wrapping_add(120_000)));
+                    b.target = 0;
+                    return;
+                }
+                if now.wrapping_sub(b.last_attack) >= b.attack_ms {
+                    b.last_attack = now;
+                    b.attacks += 1;
+                    let f = motion(OBJECTATTACK, pos, dir_to(pos, (tx, ty)).max(1), now, Some((tx, ty, 2, 10000 + b.target as u16)));
+                    self.bot_send(h, f);
+                }
+                return; // standing off: the arrow reaches it
+            }
             if cfg.cast && cheb(pos, (tx, ty)) <= cfg.cast_range && self.bot_attack_spell(h).is_some() {
                 if now.wrapping_sub(b.last_cast) >= cfg.cast_ms * b.attack_ms / cfg.attack_ms.max(1) && self.bot_cast(h, pos, (tx, ty), now) {
                     b.last_cast = now;
@@ -1215,6 +2019,26 @@ impl Game {
         let tired = hp * 100 < max_hp * cfg.tired_pct;
         let max_dice = self.bot_max_dice(h, cfg);
         // between two fights: supplies first, then what lies about, then the next monster
+        if b.target == 0 {
+            b.flee_steps = 0;
+        }
+        // hurt, or a mage out of mana: it stands still, away from monsters, until it has recovered (hysteresis: down at `tired`, up at `recover-percent`)
+        if cfg.recover {
+            let casts = self.bot_role(h, b).mage;
+            let (mp, max_mp) = self.clients[h].as_ref().map_or((0, 1), |c| (c.mp, c.get_max_mp().max(1)));
+            let low = hp * 100 < max_hp * cfg.tired_pct || (casts && mp * 100 < max_mp * 30);
+            let high = hp * 100 >= max_hp * cfg.recover_high && (!casts || mp * 100 >= max_mp * cfg.recover_high);
+            if !b.recovering && low {
+                b.recovering = true;
+                log(&format!("(bot) {}: hp {hp}/{max_hp}, mp {mp}/{max_mp}: stands still to recover", b.ch));
+            } else if b.recovering && high {
+                b.recovering = false;
+                log(&format!("(bot) {}: recovered (hp {hp}/{max_hp}, mp {mp}/{max_mp})", b.ch));
+            }
+            if b.recovering && b.target == 0 && !self.bot_hostile_near(m, pos, 5) {
+                return;
+            }
+        }
         if b.target == 0 && !tired && now.wrapping_sub(b.react_until) as i32 <= 0 && b.react_until != 0 {
             return; // still getting its breath after the last kill
         }
@@ -1229,13 +2053,29 @@ impl Game {
                 return;
             }
         }
-        if b.target == 0 && !tired && self.bot_maybe_enlist(h, b, cfg, now) {
+        if b.mode == Mode::Hunt && b.target == 0 && !tired && self.bot_maybe_enlist(h, b, cfg, now) {
             return;
         }
-        if b.target == 0 && !tired && self.bot_maybe_raid(h, b, cfg, (pos, m), (hp, max_hp), now) {
+        if b.mode == Mode::Hunt && b.target == 0 && !tired && self.bot_maybe_raid(h, b, cfg, (pos, m), (hp, max_hp), now) {
             return;
         }
-        if cfg.roam && b.target == 0 && !tired {
+        if b.mode == Mode::Hunt && b.target == 0 && !tired && self.bot_maybe_quest(h, b, cfg, now) {
+            return;
+        }
+        if b.mode == Mode::Hunt && cfg.roam && cfg.move_minutes.1 > 0 && b.target == 0 && !tired && self.bot_party_leader(h).is_none() {
+            if b.next_move == 0 {
+                b.next_move = now.wrapping_add(self.dice(cfg.move_minutes.0 as i32, cfg.move_minutes.1 as i32).max(1) as u32 * 60_000);
+            } else if now.wrapping_sub(b.next_move) as i32 >= 0 {
+                b.next_move = now.wrapping_add(self.dice(cfg.move_minutes.0 as i32, cfg.move_minutes.1 as i32).max(1) as u32 * 60_000);
+                if self.bot_roam_to(b, (pos, m), max_dice, false, true) {
+                    return;
+                }
+            }
+        }
+        if b.mode == Mode::Hunt && b.target == 0 && !tired && self.bot_follow(h, b, cfg, (pos, m), now) {
+            return;
+        }
+        if b.mode == Mode::Hunt && cfg.roam && b.target == 0 && !tired && self.bot_party_leader(h).is_none() {
             if b.max_dice_seen == 0 {
                 b.max_dice_seen = max_dice;
             } else if max_dice > b.max_dice_seen {
@@ -1248,7 +2088,7 @@ impl Game {
         if b.target == 0 && !tired && self.bot_maybe_drop(h, b, cfg, pos, now) {
             return;
         }
-        if b.target == 0 && !tired && (self.bot_maybe_shop(h, b, cfg, (pos, m), now) || (cfg.loot && self.bot_loot(h, b, cfg, (pos, m), now))) {
+        if b.target == 0 && !tired && ((b.mode == Mode::Hunt && self.bot_maybe_shop(h, b, cfg, (pos, m), now)) || (cfg.loot && self.bot_loot(h, b, cfg, (pos, m), now))) {
             return;
         }
         if b.target == 0 {
@@ -1258,10 +2098,13 @@ impl Game {
             for dx in -sight..=sight {
                 for dy in -sight..=sight {
                     let (o, ot) = self.maps[m].get_owner(pos.0 + dx, pos.1 + dy);
-                    if ot == OWNERTYPE_NPC && o > 0 && !b.ignore.iter().any(|&(i, _)| i == o as usize) && self.bot_prey(o as usize, m).is_some() && self.npcs[o as usize].as_ref().is_some_and(|n| n.hit_dice <= max_dice) && dx.abs().max(dy.abs()) < best.0 {
+                    if ot == OWNERTYPE_NPC && o > 0 && !b.ignore.iter().any(|&(i, _)| i == o as usize) && self.bot_prey(o as usize, m).is_some() && self.npcs[o as usize].as_ref().is_some_and(|n| (n.hit_dice <= max_dice || b.quest_type != 0) && (b.quest_type == 0 || n.type_ as i32 == b.quest_type)) && dx.abs().max(dy.abs()) < best.0 {
                         best = (dx.abs().max(dy.abs()), o as usize);
                     }
                 }
+            }
+            if let Some(t) = self.bot_assist(h, m, pos, sight + 4, &b.ignore).filter(|_| cfg.party_follow && !tired) {
+                best = (0, t);
             }
             b.target = best.1;
             b.attacks = 0;
@@ -1271,12 +2114,23 @@ impl Game {
         }
         if let Some((tx, ty, reach)) = self.bot_prey(b.target, m) {
             b.idle_since = None;
+            // nearly dead with nothing to drink or read: away from it, a few steps (it keeps up more often than not, but a bot
+            // that gets out of its reach can recover; after 12 steps it turns and fights)
+            if cfg.flee && hp * 100 < max_hp * cfg.flee_pct && b.flee_steps < 12 && self.bot_count(h, is_potion) == 0 && self.bot_count(h, is_recall_scroll) == 0 && cheb(pos, (tx, ty)) <= 4 {
+                if b.flee_steps == 0 {
+                    log(&format!("(bot) {}: hp {hp}/{max_hp} and nothing to drink: walks away from the monster", b.ch));
+                }
+                b.flee_steps += 1;
+                if self.bot_flee(h, b, cfg, (pos, m), (tx, ty), now) {
+                    return;
+                }
+            }
             if cfg.cast && cheb(pos, (tx, ty)) <= cfg.cast_range && self.bot_attack_spell(h).is_some() {
                 let thp = self.npcs[b.target].as_ref().map_or(0, |n| n.hp);
                 if b.attacks == 0 {
                     b.target_hp0 = thp;
                 }
-                if b.attacks >= cfg.giveup_hits && thp * 100 > b.target_hp0 * cfg.giveup_pct {
+                if b.attacks >= cfg.giveup_hits * 2 && thp * 100 > b.target_hp0 * cfg.giveup_pct {
                     log(&format!("(bot) {}: giving up on npc {} ({thp}/{} HP after {} casts)", b.ch, b.target, b.target_hp0, b.attacks));
                     b.ignore.push((b.target, now.wrapping_add(120_000)));
                     b.target = 0;
@@ -1311,7 +2165,7 @@ impl Game {
             }
         } else if !tired {
             let idle = *b.idle_since.get_or_insert(now);
-            if cfg.roam && now.wrapping_sub(idle) > cfg.roam_idle_ms && now.wrapping_sub(b.last_roam) > 20_000 {
+            if b.mode == Mode::Hunt && cfg.roam && now.wrapping_sub(idle) > cfg.roam_idle_ms && now.wrapping_sub(b.last_roam) > 20_000 && self.bot_party_leader(h).is_none() {
                 b.last_roam = now;
                 if self.bot_roam(b, (pos, m), max_dice, false) {
                     return;
@@ -1333,7 +2187,77 @@ impl Game {
         let casts = self.clients[h].as_ref().is_some_and(|c| {
             self.data.magic.iter().enumerate().any(|(i, f)| c.magic_mastery.get(i) == Some(&1) && f.as_deref().and_then(Spell::parse).is_some_and(|sp| sp.category == 1 && matches!(sp.ty, 1 | 3) && sp.cost >= 0))
         });
-        role_of(b.arch, casts)
+        let shoots = self.clients[h].as_ref().is_some_and(|c| {
+            let bow = usize::try_from(c.equip_status[EQUIPPOS_TWOHAND as usize]).ok().and_then(|k| c.items.get(k)?.as_ref()).is_some_and(|i| i.cfg.item_effect_type == ITEMEFFECTTYPE_ATTACK_ARROW);
+            bow && arrows_of(c) > 0
+        });
+        role_of(b.arch, if b.arch == 4 { shoots } else { casts })
+    }
+
+    /// Whether a monster that attacks (hostile, alive, attack allowed) is within `r` tiles.
+    fn bot_hostile_near(&self, m: usize, pos: (i16, i16), r: i16) -> bool {
+        (-r..=r).any(|dx| {
+            (-r..=r).any(|dy| {
+                let (o, ot) = self.maps[m].get_owner(pos.0 + dx, pos.1 + dy);
+                ot == OWNERTYPE_NPC && o > 0 && self.bot_prey(o as usize, m).is_some()
+            })
+        })
+    }
+
+    /// One step away from the monster at `from` (a tile 8 to 3 tiles off in the opposite direction that it can reach).
+    /// False: nowhere to go.
+    fn bot_flee(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), from: (i16, i16), now: u32) -> bool {
+        let (pos, m) = at;
+        let (dx, dy) = ((pos.0 - from.0).signum(), (pos.1 - from.1).signum());
+        let (dx, dy) = if (dx, dy) == (0, 0) { (1, 0) } else { (dx, dy) };
+        for r in (3..=8).rev() {
+            let goal = (pos.0 + dx * r, pos.1 + dy * r);
+            if self.maps[m].get_moveable(goal.0, goal.1).0 && self.bot_walk(h, b, cfg, at, goal, 0, None, 14, now) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The healing spell it could cast now (Magic.cfg type 2, not for sale to nobody): the dearest it has the mana for.
+    fn bot_heal_spell(&self, h: usize) -> Option<(usize, i32)> {
+        let c = self.clients[h].as_ref()?;
+        self.data
+            .magic
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| c.magic_mastery.get(i) == Some(&1))
+            .filter_map(|(i, f)| Some((i, Spell::parse(f.as_deref()?)?)))
+            .filter(|(_, sp)| sp.category == 0 && sp.ty == 2 && sp.mana <= c.mp && sp.cost >= 0)
+            .max_by_key(|(_, sp)| sp.cost)
+            .map(|(i, sp)| (i, sp.mana))
+    }
+
+    /// Heals itself or the weakest party mate (same map, within 8 tiles) below `heal-percent`. True: it cast.
+    fn bot_heal(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, pos: (i16, i16), now: u32) -> bool {
+        if !cfg.cast || now.wrapping_sub(b.last_cast) < 2500 {
+            return false;
+        }
+        let Some((idx, _)) = self.bot_heal_spell(h) else { return false };
+        let Some(c) = self.clients[h].as_ref() else { return false };
+        let (m, pid) = (c.map_index, c.party_id);
+        let mut best: Option<(i32, (i16, i16), String)> = None;
+        let mates = if pid != 0 { self.party_members(pid) } else { Vec::new() };
+        for j in std::iter::once(h).chain(mates) {
+            let Some(o) = self.clients[j].as_ref() else { continue };
+            if o.map_index != m || o.is_killed || cheb(pos, (o.x, o.y)) > 8 {
+                continue;
+            }
+            let pct = o.hp * 100 / o.get_max_hp().max(1);
+            if pct < cfg.heal_pct && best.as_ref().is_none_or(|(p, _, _)| pct < *p) {
+                best = Some((pct, (o.x, o.y), String::from_utf8_lossy(crate::util::cstr(&o.char_name)).to_string()));
+            }
+        }
+        let Some((pct, at, name)) = best else { return false };
+        b.last_cast = now;
+        log(&format!("(bot) {}: heals {name} ({pct} % HP)", b.ch));
+        self.bot_cast_idx(h, pos, at, idx, now);
+        true
     }
 
     /// The attack spell it could cast now: learned (mastery 1), a damage type, the strongest (the dearest) it has the mana for.
@@ -1351,7 +2275,7 @@ impl Game {
             .map(|(i, sp)| (i, sp.mana))
     }
 
-    /// The attack spell it could learn now: not learned, within its Int and its gold less the reserve; the dearest.
+    /// The spell it could learn now: an attack spell first, then a healing one; not learned, within its Int and its gold less the reserve; the dearest.
     fn bot_spell_wish(&self, h: usize, gold: u32, reserve: u32, tried: &[Vec<u8>]) -> Option<(Vec<u8>, u32)> {
         let c = self.clients[h].as_ref()?;
         let budget = gold.checked_sub(reserve)? as i32;
@@ -1366,14 +2290,20 @@ impl Game {
                 let name = crate::util::cstr(f.get(1)?).to_vec();
                 Some((sp, name, crate::util::atoi(f.get(16)?)))
             })
-            .filter(|(sp, name, req_int)| sp.category == 1 && matches!(sp.ty, 1 | 3) && sp.cost >= 0 && sp.cost <= budget && *req_int <= c.get_int() && !tried.contains(name))
-            .max_by_key(|(sp, _, _)| sp.cost)
+            .filter(|(sp, name, req_int)| ((sp.category == 1 && matches!(sp.ty, 1 | 3)) || (sp.category == 0 && sp.ty == 2)) && sp.cost >= 0 && sp.cost <= budget && *req_int <= c.get_int() && !tried.contains(name))
+            .max_by_key(|(sp, _, _)| (sp.category == 1) as i32 * 100_000 + sp.cost)
             .map(|(sp, name, _)| (name, sp.cost as u32))
     }
 
     /// The precast motion and the cast at a tile: the two frames a client sends. False: no spell it could cast.
     fn bot_cast(&mut self, h: usize, pos: (i16, i16), at: (i16, i16), now: u32) -> bool {
         let Some((idx, _)) = self.bot_attack_spell(h) else { return false };
+        self.bot_cast_idx(h, pos, at, idx, now);
+        true
+    }
+
+    /// Spell `idx` at a tile: the precast motion and the cast, the two frames a client sends.
+    fn bot_cast_idx(&mut self, h: usize, pos: (i16, i16), at: (i16, i16), idx: usize, now: u32) {
         let f = motion(OBJECTMAGIC, pos, dir_to(pos, at).max(1), now, Some((0, 0, 0, 0)));
         self.bot_send(h, f);
         let mut f = common(COMMONTYPE_MAGIC, pos, at.0 as u32);
@@ -1381,7 +2311,6 @@ impl Game {
         w.u32(15, at.1 as u32);
         w.u32(19, idx as u32 + 100);
         self.bot_send(h, f);
-        true
     }
 
     /// Spends the level-up points (3 a level) as the archetype wants (`POINTS`).
@@ -1389,7 +2318,10 @@ impl Game {
         let pool = c_pool(self, h).min(30);
         let cycle = POINTS[b.arch as usize];
         let mut v = [0u8; 6];
-        for _ in 0..pool {
+        let (chr, citizen, level) = self.clients[h].as_ref().map_or((20, false, 1), |c| (c.range, !c.is_neutral(), c.level));
+        let want_chr = if self.bots.cfg.guilds && citizen && level >= 8 { (20 - chr).clamp(0, pool) } else { 0 };
+        v[5] = want_chr as u8;
+        for _ in 0..pool - want_chr {
             v[cycle[b.pt_pos % 4]] += 1;
             b.pt_pos += 1;
         }
@@ -1493,37 +2425,63 @@ impl Game {
     /// Nothing to fight in sight for a while: picks a hunting ground (one of the nearest live monsters it can beat, on
     /// this map or the nearest map of this server that has some), makes it the new home and goes there. False: none.
     fn bot_roam(&mut self, b: &mut Bot, at: ((i16, i16), usize), max_dice: i32, forced: bool) -> bool {
+        self.bot_roam_to(b, at, max_dice, forced, false)
+    }
+
+    /// The hunting map: every reachable map (at most 4 teleports away) with monsters it can beat is a candidate, weighted by how
+    /// many there are and how strong, less for each teleport, so that bots spread over the world instead of all taking the
+    /// nearest map; `forced` (it levelled up) wants one with stronger monsters than it fights now, `leave` another map than this.
+    /// Then the tile: one of the 5 nearest of the strongest it can beat there. True: it set off.
+    fn bot_roam_to(&mut self, b: &mut Bot, at: ((i16, i16), usize), max_dice: i32, forced: bool, leave: bool) -> bool {
         let (pos, m) = at;
         let prey: Vec<(usize, (i16, i16), i32)> = self.npcs.iter().flatten().filter(|n| n.side >= SIDE_HOSTILE && !n.is_killed && n.hp > 0 && n.hit_dice <= max_dice && self.maps[n.map_index].is_attack_enabled).map(|n| (n.map_index, (n.x, n.y), n.hit_dice)).collect();
-        let mut here: Vec<(i16, i16, i32)> = prey.iter().filter(|&&(pm, t, _)| pm == m && cheb(t, pos) > 2).map(|&(_, t, d)| (t.0, t.1, d)).collect();
-        let best = here.iter().map(|t| t.2).max();
-        if forced && best.is_none_or(|d| d <= b.ground_dice) {
-            return false; // levelled up, but nothing stronger to fight on this map
+        let hops = self.bot_hops(m, 4);
+        let mut per_map: Vec<(u32, i32)> = vec![(0, 0); self.maps.len()]; // (monsters, strongest HitDice)
+        for &(pm, t, d) in &prey {
+            if pm != m || cheb(t, pos) > 2 {
+                per_map[pm] = (per_map[pm].0 + 1, per_map[pm].1.max(d));
+            }
         }
-        // the strongest it can beat (one HitDice below counts as well), the nearest of those; several bots: not all the same one
-        here.retain(|t| best.is_some_and(|d| t.2 >= d - 1));
-        here.sort_by_key(|t| cheb((t.0, t.1), pos));
-        here.truncate(5);
-        let ground = if !here.is_empty() {
-            let k = self.dice(1, here.len() as i32) as usize - 1;
-            Some((m, (here[k].0, here[k].1), here[k].2))
-        } else if forced {
-            None
-        } else {
-            let mut has = vec![false; self.maps.len()];
-            prey.iter().for_each(|&(pm, _, _)| has[pm] = true);
-            let d = self.bot_route(m, &|d| has[d], pos).map(|(_, d)| d);
-            let there: Vec<(usize, (i16, i16), i32)> = prey.iter().filter(|&&(pm, _, _)| Some(pm) == d).copied().collect();
-            (!there.is_empty()).then(|| there[self.dice(1, there.len() as i32) as usize - 1])
-        };
-        let Some((gm, gt, gd)) = ground else {
-            if !forced {
+        let mut cands: Vec<(usize, u32)> = Vec::new();
+        for (d, &(n, best)) in per_map.iter().enumerate() {
+            let Some(h) = hops[d] else { continue };
+            if n == 0 || (forced && best <= b.ground_dice) || (leave && d == m) {
+                continue;
+            }
+            // what it is worth: monsters (up to 30) times strength, nearer maps first
+            cands.push((d, (n.min(30) * (1 + best as u32) * 10 / (1 + 3 * h as u32)).max(1)));
+        }
+        if cands.is_empty() {
+            if !forced && !leave {
                 log(&format!("(bot) {}: no monster it can beat on any map it can reach", b.ch));
             }
             return false;
-        };
-        log(&format!("(bot) {}: {}, new hunting ground {}({},{}) (HitDice {gd}, up to {max_dice})", b.ch, if forced { "stronger now" } else { "no monster in sight" }, String::from_utf8_lossy(&self.maps[gm].name), gt.0, gt.1));
-        (b.home, b.mode, b.no_route_logged, b.wander, b.idle_since, b.ground_dice) = (Some((gm, gt)), Mode::Travel, false, None, None, gd);
+        }
+        let total: u32 = cands.iter().map(|c| c.1).sum();
+        let mut roll = self.dice(1, total as i32) as u32;
+        let gm = cands.iter().find(|c| {
+            if roll <= c.1 {
+                true
+            } else {
+                roll -= c.1;
+                false
+            }
+        }).map_or(cands[0].0, |c| c.0);
+        let mut here: Vec<(i16, i16, i32)> = prey.iter().filter(|&&(pm, t, _)| pm == gm && (gm != m || cheb(t, pos) > 2)).map(|&(_, t, d)| (t.0, t.1, d)).collect();
+        let best = here.iter().map(|t| t.2).max();
+        here.retain(|t| best.is_some_and(|d| t.2 >= d - 1));
+        if gm == m {
+            here.sort_by_key(|t| cheb((t.0, t.1), pos)); // on this map: the nearest, not all the same one
+            here.truncate(5);
+        }
+        let Some(&(gx, gy, gd)) = (!here.is_empty()).then(|| &here[self.dice(1, here.len() as i32) as usize - 1]) else { return false };
+        log(&format!(
+            "(bot) {}: {}, new hunting ground {}({gx},{gy}) (HitDice {gd}, up to {max_dice})",
+            b.ch,
+            if forced { "stronger now" } else if leave { "time for another map" } else { "no monster in sight" },
+            String::from_utf8_lossy(&self.maps[gm].name)
+        ));
+        (b.home, b.mode, b.no_route_logged, b.wander, b.idle_since, b.ground_dice) = (Some((gm, (gx, gy))), Mode::Travel, false, None, None, gd);
         b.path.clear();
         true
     }
@@ -1565,6 +2523,28 @@ impl Game {
         true
     }
 
+    /// The maps of this server reachable from `from` through teleport tiles, with the number of teleports (at most `max`).
+    fn bot_hops(&self, from: usize, max: u8) -> Vec<Option<u8>> {
+        let mut hops = vec![None; self.maps.len()];
+        hops[from] = Some(0);
+        let mut q = VecDeque::from([from]);
+        while let Some(a) = q.pop_front() {
+            let d = hops[a].unwrap();
+            if d >= max {
+                continue;
+            }
+            for t in &self.maps[a].teleport_locs {
+                if let Some(n) = self.map_index(&t.dest_map) {
+                    if hops[n].is_none() {
+                        hops[n] = Some(d + 1);
+                        q.push_back(n);
+                    }
+                }
+            }
+        }
+        hops
+    }
+
     /// The teleport tile of map `from` (nearest to `pos`) that starts the shortest chain of this server's maps to one
     /// `to` accepts, and that last map.
     fn bot_route(&self, from: usize, to: &dyn Fn(usize) -> bool, pos: (i16, i16)) -> Option<((i16, i16), usize)> {
@@ -1597,7 +2577,15 @@ impl Game {
 
     /// Starts a shopping trip when supplies are low (or the bag is full of loot) and it could pay for something.
     fn bot_maybe_shop(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), now: u32) -> bool {
-        if !cfg.shop || now.wrapping_sub(b.last_shop) < cfg.shop_cooldown_ms {
+        if !cfg.shop {
+            return false;
+        }
+        if b.shop_cd == 0 {
+            // the first look comes after a random part of the cool-down: fifty bots do not walk into the shop together
+            b.shop_cd = cfg.shop_cooldown_ms / 2 + self.dice(1, cfg.shop_cooldown_ms.max(1) as i32) as u32;
+            b.last_shop = now.wrapping_sub(cfg.shop_cooldown_ms / 2);
+        }
+        if now.wrapping_sub(b.last_shop) < b.shop_cd {
             return false;
         }
         let (pos, m) = at;
@@ -1608,7 +2596,9 @@ impl Game {
         let worn = cfg.repair && self.clients[h].as_ref().is_some_and(|c| repair_slot(c, &b.equip_tried, &[], cfg.repair_pct, gold).is_some());
         let wish = cfg.buy_gear && self.bot_wish(h, gold, cfg.gear_reserve, &b.wish_tried, role).is_some();
         let spell = cfg.learn_spells && self.bot_spell_wish(h, gold, cfg.gear_reserve, &b.spell_tried).is_some();
-        let low = (cfg.use_potions && potions < cfg.shop_potion_min) || (cfg.use_recall && scrolls < cfg.shop_scroll_min) || worn || wish || spell;
+        let arrows_low = role.archer && self.clients[h].as_ref().is_some_and(|c| arrows_of(c) < cfg.arrow_min && has_bow(c)) && gold >= 200;
+        let level = self.clients[h].as_ref().map_or(1, |c| c.level);
+        let low = arrows_low || (cfg.use_potions && potions < potion_wants(cfg, level).0) || (cfg.use_recall && scrolls < cfg.shop_scroll_min) || worn || wish || spell;
         let full = cfg.sell_loot && bag >= cfg.shop_bag_slots;
         if !low && !full {
             return false;
@@ -1620,6 +2610,7 @@ impl Game {
         }
         let cheapest = self.data.item_by_name(cfg.shop_potion_item.as_bytes()).map_or(30, |i| i.price as i64);
         b.last_shop = now; // whatever happens below, the next look is after the cool-down
+        b.shop_cd = cfg.shop_cooldown_ms / 2 + self.dice(1, cfg.shop_cooldown_ms.max(1) as i32) as u32;
         if !full && wealth < cheapest {
             log(&format!("(bot) {}: low on supplies ({potions} potions, {scrolls} scrolls) but poor (~{wealth} gold)", b.ch));
             return false;
@@ -1676,7 +2667,7 @@ impl Game {
             }
         }
         let gold = self.item_count(h, b"Gold").1;
-        let wants = [(cfg.use_potions, &cfg.shop_potion_item, cfg.shop_potion_target, self.bot_count(h, is_potion)), (cfg.use_recall, &cfg.shop_scroll_item, cfg.shop_scroll_target, self.bot_count(h, is_recall_scroll))];
+        let wants = [(cfg.use_potions, &cfg.shop_potion_item, potion_wants(cfg, self.clients[h].as_ref().map_or(1, |c| c.level)).1, self.bot_count(h, is_potion)), (cfg.use_recall, &cfg.shop_scroll_item, cfg.shop_scroll_target, self.bot_count(h, is_recall_scroll))];
         let have_all: u32 = wants.iter().map(|w| w.3).sum();
         if have_all > b.last_have {
             b.buy_fails = 0;
@@ -1694,6 +2685,15 @@ impl Game {
                 self.bot_send(h, f);
                 return;
             }
+        }
+        if role.archer && b.buy_fails < 3 && self.clients[h].as_ref().is_some_and(|c| arrows_of(c) < cfg.arrow_min && has_bow(c)) && gold >= 150 {
+            b.buy_fails += 1;
+            b.last_trade = now;
+            log(&format!("(bot) {}: buys 100 arrows ({gold} gold)", b.ch));
+            let mut f = common(COMMONTYPE_REQ_PURCHASEITEM, pos, 1);
+            W(&mut f).bytes(23, b"100Arrows");
+            self.bot_send(h, f);
+            return;
         }
         if cfg.buy_gear && b.wish_buys < 4 {
             if let Some((name, price)) = self.bot_wish(h, gold, cfg.gear_reserve, &b.wish_tried, role) {
@@ -1733,6 +2733,17 @@ impl Game {
         b.path.clear();
     }
 
+    /// Puts bag slot `k` (the whole stack) on the ground where it stands.
+    fn bot_drop_slot(&mut self, h: usize, b: &Bot, k: usize, pos: (i16, i16)) {
+        let Some(name) = self.clients[h].as_ref().and_then(|c| c.items.get(k)?.as_ref()).map(|i| i.cfg.name.clone()) else { return };
+        log(&format!("(bot) {}: drops {} (slot {k}) on the ground", b.ch, String::from_utf8_lossy(crate::util::cstr(&name))));
+        let mut f = common(COMMONTYPE_ITEMDROP, pos, k as u32);
+        let mut w = W(&mut f);
+        w.u32(15, u32::MAX); // the whole stack
+        w.bytes(23, &name);
+        self.bot_send(h, f);
+    }
+
     /// Every `drop-check-ms` there is a `drop-percent` chance that it leaves one thing it does not care about on the ground
     /// (a player empties his bag like that now and then). The tile is left alone by its own looting for 10 minutes.
     fn bot_maybe_drop(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, pos: (i16, i16), now: u32) -> bool {
@@ -1750,13 +2761,7 @@ impl Game {
             return false;
         }
         let k = junk[self.dice(1, junk.len() as i32) as usize - 1];
-        let name = self.clients[h].as_ref().unwrap().items[k].as_ref().unwrap().cfg.name.clone();
-        log(&format!("(bot) {}: drops {} (slot {k}) on the ground", b.ch, String::from_utf8_lossy(crate::util::cstr(&name))));
-        let mut f = common(COMMONTYPE_ITEMDROP, pos, k as u32);
-        let mut w = W(&mut f);
-        w.u32(15, u32::MAX); // the whole stack
-        w.bytes(23, &name);
-        self.bot_send(h, f);
+        self.bot_drop_slot(h, b, k, pos);
         b.loot_skip.push((pos, now.wrapping_add(600_000)));
         true
     }
@@ -1946,7 +2951,7 @@ mod tests {
     fn classes_differ_in_points_stats_looks_and_gear() {
         let cfg = BotCfg { count: 10, ..Default::default() };
         let arch: Vec<u8> = (1..=10).map(|i| arch_of(&cfg, i)).collect();
-        assert_eq!(arch, vec![0, 0, 2, 3, 1, 0, 0, 2, 3, 1], "warrior, warrior, knight, duelist, mage, cycling");
+        assert_eq!(arch, vec![0, 2, 3, 1, 4, 0, 0, 2, 3, 1], "warrior, knight, duelist, mage, archer, warrior, cycling");
         for st in START_STATS {
             assert!(st.iter().sum::<u8>() == 70 && st.iter().all(|v| (10..=14).contains(v)), "{st:?}: the Login only takes 10-14 each and 70 in all");
         }
@@ -1957,6 +2962,61 @@ mod tests {
         assert!(role_of(2, false).refuses(EQUIPPOS_TWOHAND) && !role_of(2, false).refuses(EQUIPPOS_LHAND));
         assert!(role_of(3, false).refuses(EQUIPPOS_LHAND) && role_of(3, false).refuses(EQUIPPOS_TWOHAND) && !role_of(3, false).refuses(EQUIPPOS_RHAND));
         assert!(!role_of(0, false).refuses(EQUIPPOS_TWOHAND) && !role_of(1, false).refuses(EQUIPPOS_RHAND));
+    }
+
+    #[test]
+    fn chat_answers_greetings_in_the_language_it_hears() {
+        assert_eq!(chat_kind("hola", false, false), Some((false, 0)));
+        assert_eq!(chat_kind("Hello there", false, false), Some((true, 0)));
+        assert_eq!(chat_kind("que tal?", false, true), Some((false, 1)), "a whisper is answered whatever it says");
+        assert_eq!(chat_kind("help me please", true, false), Some((true, 2)));
+        assert_eq!(chat_kind("quieres un grupo", true, false), Some((false, 3)));
+        assert_eq!(chat_kind("vendo espada", false, false), None, "a line nobody is talking to a bot with is not answered");
+        assert_eq!(chat_kind("vendo espada", false, true), Some((false, 4)));
+        assert_eq!(pick(&HI_ES, 1), HI_ES[0]);
+    }
+
+    #[test]
+    fn an_archer_wears_bows_and_shoots_with_empty_off_hand() {
+        let (tx, _rx) = unbounded_channel();
+        let mut c = Client::new(1, 1, tx, b"1.2.3.4".to_vec(), 0);
+        c.str_ = 10;
+        let mut bow = Item::new(&Default::default());
+        (bow.cfg.item_type, bow.cfg.category, bow.cfg.equip_pos, bow.cfg.item_effect_type, bow.cfg.item_effect_value[0], bow.cfg.item_effect_value[1]) = (1, 1, EQUIPPOS_TWOHAND, ITEMEFFECTTYPE_ATTACK_ARROW, 1, 6);
+        (bow.max_life_span, bow.cur_life_span) = (100, 100);
+        let mut sword = bow.clone();
+        (sword.cfg.equip_pos, sword.cfg.item_effect_type) = (EQUIPPOS_RHAND, ITEMEFFECTTYPE_ATTACK);
+        let archer = role_of(4, false);
+        assert!(wear_score(&c, &bow, archer).is_some(), "an archer wears a bow");
+        assert!(wear_score(&c, &sword, archer).is_some(), "with no bow yet it fights with a sword");
+        assert!(wear_score(&c, &sword, role_of(4, true)).is_none(), "and with a bow ready, not with a sword");
+        assert!(wear_score(&c, &bow, role_of(0, false)).is_none(), "a warrior has no use for it");
+        assert!(is_surplus(&c, 0, &sword, &[], role_of(4, true)), "with a bow ready the spare sword is surplus");
+        assert!(role_of(4, true).refuses(EQUIPPOS_RHAND) && !role_of(4, false).refuses(EQUIPPOS_RHAND), "the dagger stays until the bow and arrows are there");
+        assert!(role_of(4, false).refuses(EQUIPPOS_LHAND), "no shield with a two-handed bow");
+    }
+
+    #[test]
+    fn a_clearly_better_armour_piece_replaces_the_worn_one_and_gold_buys_more_potions_later() {
+        let (tx, _rx) = unbounded_channel();
+        let mut c = Client::new(1, 1, tx, b"1.2.3.4".to_vec(), 0);
+        c.str_ = 10;
+        let piece = |def: i32| {
+            let mut it = Item::new(&Default::default());
+            (it.cfg.item_type, it.cfg.category, it.cfg.equip_pos, it.cfg.item_effect_value[0], it.cfg.item_effect_value[3]) = (1, 6, EQUIPPOS_BODY, def, 0);
+            (it.max_life_span, it.cur_life_span) = (100, 100);
+            it
+        };
+        (c.items[0], c.items[1], c.items[2], c.items[3]) = (Some(piece(10)), Some(piece(11)), Some(piece(14)), Some(piece(30)));
+        c.equip_status[EQUIPPOS_BODY as usize] = 0;
+        let role = Role::default();
+        let ws = |k: usize| wear_score(&c, c.items[k].as_ref().unwrap(), role);
+        assert_eq!((ws(1), ws(2), ws(3)), (None, Some(4), Some(20)), "11 over 10 is not worth the change, 14 is (a fifth and two points), 30 more");
+        assert!(is_surplus(&c, 1, c.items[1].as_ref().unwrap(), &[], role), "the marginal piece is surplus");
+        assert!(!is_surplus(&c, 3, c.items[3].as_ref().unwrap(), &[], role), "the better one is kept to be worn");
+        let cfg = BotCfg::default();
+        assert_eq!(potion_wants(&cfg, 1), (cfg.shop_potion_min, cfg.shop_potion_target));
+        assert!(potion_wants(&cfg, 40).0 > cfg.shop_potion_min && potion_wants(&cfg, 40).1 > potion_wants(&cfg, 10).1 && potion_wants(&cfg, 180).1 <= 60);
     }
 
     #[test]

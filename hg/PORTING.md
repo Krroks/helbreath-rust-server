@@ -1296,8 +1296,39 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   weapon). A new character is also made with its own look (`look_of`: gender, skin, hair style and colour, underwear colour, spread by a
   hash of the bot's number); gear made for the other gender is surplus. Characters that already exist keep their stats; their look can be
   changed in `char_database` (Gender, Skin, HairStyle, HairColor, Underwear, Appr1) while `hg` is stopped.
-Not yet: fleeing on foot, guilds (creating one asks for level 20 and 20 charisma), the crusade and the other events, fight zones
-(they need a reservation and a ticket), quests.
+- live control (`Bots.cfg` read again every 5 s when it changes, `bot-pause`, console `bots status | pause | resume | count N | reload`, one
+  `(bots)` summary line every `summary-ms`): the new values take effect at once (not the Login address, prefixes or password); more
+  bots are started, fewer log off.
+- sessions (`schedule`, `session-minutes`, `gap-minutes`): a bot plays 60-180 minutes, logs off (saved) and comes back 10-90 minutes later
+  (half at 20-1 h, 1.6 times in the morning); a bot's first session is cut at random so that they do not all leave together. The login task
+  waits while `OFFLINE[n]` is in the future (also `u64::MAX` = taken out by `bot-count`).
+- chat (`chat`, `chat-greet-percent`): `chat.rs` calls `bots_hear` for each receiver of a normal or whispered line; a bot that is greeted,
+  named or whispered to by a player (never by a bot) queues an answer from a small Spanish / English bank, a few seconds later (slow paces
+  take longer), and says it through `chat_msg` (a whisper by setting `whisper_player_index` for the call); it greets a player that comes
+  within 6 tiles with `chat-greet-percent` once in 10 minutes. Probe: `hgprobe botchat`.
+- flee and recover (`flee`, `recover`): below `flee-percent` HP with no potion or scroll it walks away from the monster (12 steps at most);
+  below `tired-percent` HP, or (mages) 30 % mana, it stands still away from monsters until `recover-percent`.
+- support: a bot that knows a healing spell (Magic.cfg type 2) heals itself or a party mate below `heal-percent` and learns the spell in a
+  shop after the attack spells; the `archer` class wears a bow (`ITEMEFFECTTYPE_ATTACK_ARROW`), shoots up to `bow-range` tiles (the
+  attack frame with type 2) and buys `100Arrows` below `arrow-min`; archers and casters get twice `giveup-hits`.
+- parties (`party-follow`): the bots of a party follow the one with the lowest handle (a mate more than 12 tiles away or on another map
+  travels to it) and fight the monster a mate fights; a join request nobody waits for any more is forgotten (the server never clears it)
+  and one repeated more than 3 times is refused.
+- hunting maps (`move-minutes`): `bot_roam_to` picks the map among every map up to 4 teleports away that has monsters it can beat,
+  weighted by monsters x strength / (1 + 3 x teleports), so the bots spread; every 20-60 minutes it picks another one.
+- economy: a shop trip's cool-down is drawn per bot (0.5-1.5 x `shop-cooldown-ms`) and its first one at random; the potions it wants grow
+  with the level (`potion_wants`); a worn armour piece is replaced by one at least a fifth and two points better.
+- quests (`quests`, `quest-minutes`): a citizen of level 11 or more asks the city hall (`COMMONTYPE_TALKTONPC` 4, on any town tile: the farms
+  count as town) for a quest, accepts it, goes to the map it names and kills what it asks for (only that type, whatever its HitDice) and
+  walks back to be paid; a quest that is not a monster hunt, names monsters that are not alive on this server, or takes 25 minutes is
+  cancelled. With no free bag slot it drops junk first: the server does not pay a reward it cannot put in the bag.
+- guilds (`guilds`): citizens spend one point in three on charisma (the Agility column) up to 20; the first bot with level 20, charisma 20
+  and standing in a town founds a guild (`MSGID_REQUEST_CREATENEWGUILD`, one founder at a time), the other bots of its nation ask to join
+  it by calling `guild_ticket` (the server routine that giving a ticket runs: the ticket item itself is skipped) and the master approves
+  with `COMMONTYPE_JOINGUILDAPPROVE`. Crusade (`crusade`): with `cr.mode` on, a citizen of level 10 or more sends
+  `COMMONTYPE_REQUEST_SELECTCRUSADEDUTY` 1 (fighter) and raids every minute. The crusade part is NOT tested against a live crusade.
+Not yet: building, commanding or guild-teleport duties in a crusade, fight zones (they need a reservation and a ticket), guild ranks,
+other events (Heldenian, Apocalypse, Astoria).
 
 Test (isolated Login on other ports + a copy of `Maps/All`, same MySQL): `login --tcp-port 4100 --ws-port 4102 --gs-port 5757
 --no-db-maintenance`, `hg --login 127.0.0.1:5757` with a `Bots.cfg` (`bot-count = 1`, `bot-login-address = 127.0.0.1:4100`) and a
@@ -1328,4 +1359,5 @@ Dropping (3 bots, `drop-percent = 100`, `drop-check-ms = 5000`, `primary-drop-ra
 of other kinds, loot); another bot went to pick the first one up.
 Classes (10 new bots, prefix `tst`): looks and starting stats differ per bot; after 2-5 levels the knight had 20 vit, the duelist 16 dex, the
 mage 16 int and 15 mag, the warrior 16 str.
-Remove the rows afterwards (`char_database`, `item`, `bank_item`, `skill`, `account_database` for the bot names).
+
+Remove the rows afterwards (`char_database`, `guild`, `guild_member`, `item`, `bank_item`, `skill`, `account_database` for the bot names).

@@ -201,8 +201,10 @@ fn main() {
             log(&format!("(*) {} bots from {cfg_path}", bots.list.len()));
         }
         let mut g = game::Game::new(cfg, settings, maps, tx, login, seed);
+        let ev_tx = tx.clone();
         g.bots = bots;
         // timeSetEvent(TICKDELAY, TIME_PERIODIC) -> WM_USER_TIMERSIGNAL -> OnTimer
+        (g.bots.ev, g.bots.cfg_mtime, g.bots.cfg_path) = (Some(ev_tx), std::fs::metadata(&cfg_path).and_then(|m| m.modified()).ok(), cfg_path.clone());
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(consts::TICKDELAY as u64));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !g.quit {

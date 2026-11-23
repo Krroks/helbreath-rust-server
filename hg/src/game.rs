@@ -363,6 +363,7 @@ impl Game {
                 "quit" => self.quit = true,
                 _ => {}
             },
+                l if l.starts_with("bots") => self.bots_command(&l[4..]),
         }
     }
 

@@ -136,6 +136,7 @@ impl Game {
                 };
                 if to {
                     self.send(i, &d);
+                    self.bots_hear(h, i, mode, &d);
                 }
             }
         } else {
@@ -153,6 +154,7 @@ impl Game {
                 } else if let Some(t) = (wi > 0).then(|| self.client(wi as usize)).flatten() {
                     if cstr(&wname) == cstr(&t.char_name) {
                         self.send(wi as usize, &d);
+                        self.bots_hear(h, wi as usize, mode, &d);
                     }
                 }
             }

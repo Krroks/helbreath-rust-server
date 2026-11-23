@@ -26,6 +26,8 @@
 //!
 //!   hgprobe corpse LOGIN_HOST:PORT OUT.jsonl [lost]   (skill 10 persistence, see hgprobe/skills.rs)
 //!
+//!   hgprobe botchat LOGIN_HOST:PORT OUT.jsonl X Y   (the Rust bots answer chat, next to default(X, Y): see botchat)
+//!
 //!   hgprobe clean      delete the rt* characters (items, bank, skills) and accounts again (SQL)
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -488,6 +490,40 @@ fn play(login: &str, mapdir: &str, out: &str, ws2: Option<&str>) -> u32 {
 }
 
 /// Removes everything the probe created: rt* characters (with their items, bank items and skills) and accounts.
+/// `hgprobe botchat LOGIN OUT.jsonl X Y`: the bots (prefix `Tst`, e.g. paused with `bot-pause = 1`, standing about X, Y of `default`) answer a
+/// greeting said nearby and a whisper.
+fn botchat(login: &str, out: &str, xy: (i32, i32)) -> u32 {
+    let mut k = Checks(0);
+    let log = std::fs::File::create(out).expect("out");
+    ensure_char(login, b"rthg1", b"RtHg1");
+    let (bx, by) = (xy.0, xy.1);
+    println!("     bot Tst01 at default({bx},{by})");
+    sql(&format!("UPDATE char_database SET MapLoc='default', LocX={}, LocY={}, Nation='Traveler' WHERE char_name='RtHg1' AND account_name LIKE 'rt%';", bx + 1, by));
+    let Some(gs) = enter_game(login, b"rthg1", b"RtHg1", ENTER_NEW) else {
+        k.check(false, "login enter game");
+        return k.0;
+    };
+    let Some(mut p) = init_player(&gs, b"rthg1", b"RtHg1", 1, &log, &mut k, None) else { return k.0 + 1 };
+    let from_bot = |b: &[u8]| u32at(b, 0) == COMMAND_CHATMSG && b.len() > 21 && cstr(&b[10..20]).starts_with(b"Tst");
+    let mut seen = Vec::new();
+    chat(&mut p, b"RtHg1", b"hola");
+    let a = p.c.wait_for(Duration::from_secs(20), &mut seen, |b| from_bot(b) && b[20] == 0);
+    k.check(a.is_some(), "a bot answers a greeting said nearby");
+    if let Some(a) = &a {
+        println!("     {} says: {}", String::from_utf8_lossy(cstr(&a[10..20])), String::from_utf8_lossy(cstr(&a[21..])));
+    }
+    chat(&mut p, b"RtHg1", b"/to Tst01");
+    p.c.wait_for(Duration::from_secs(2), &mut seen, |b| u32at(b, 0) == NOTIFY && u16at(b, 4) == NOTIFY_WHISPERMODEON_);
+    chat(&mut p, b"RtHg1", b"como estas?");
+    let w = p.c.wait_for(Duration::from_secs(20), &mut seen, |b| from_bot(b) && b[20] == 20);
+    k.check(w.is_some(), "Tst01 answers a whisper with a whisper");
+    if let Some(w) = &w {
+        println!("     {} whispers: {}", String::from_utf8_lossy(cstr(&w[10..20])), String::from_utf8_lossy(cstr(&w[21..])));
+    }
+    println!("{} failure(s)", k.0);
+    k.0
+}
+
 fn clean() {
     let ids = "SELECT CharID FROM char_database WHERE char_name LIKE 'rt%' OR account_name LIKE 'rt%'";
     for t in ["item", "bank_item", "skill"] {
@@ -551,6 +587,7 @@ fn main() {
         Some("mobevent") => std::process::exit(leftovers::mobevent(&a[2], &a[3], &a[4]) as i32),
         Some("leftovers2") => std::process::exit(leftovers2::leftovers2(&a[2], &a[3]) as i32),
         Some("leftovers3") => std::process::exit(leftovers3::leftovers3(&a[2], &a[3]) as i32),
+        Some("botchat") => std::process::exit(botchat(&a[2], &a[3], (a[4].parse().unwrap(), a[5].parse().unwrap())) as i32),
         Some("clean") => clean(),
         // a test account + character to play by hand (password rtpw1)
         Some("mkacct") => ensure_char(&a[2], a[3].as_bytes(), a[4].as_bytes()),
