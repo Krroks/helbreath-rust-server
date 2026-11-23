@@ -1004,6 +1004,9 @@ impl Game {
                     let l = t.cs.poison_level;
                     self.notify(th, NOTIFY_MAGICEFFECTON, &[MAGICTYPE_POISON, l], None);
                 }
+                if at == OWNERTYPE_PLAYER && tt == OWNERTYPE_PLAYER {
+                    self.bots_note_hit(th, ah); // Rust only: a bot remembers who hit it (bots.rs)
+                }
                 let t = self.client_mut(th).unwrap();
                 t.hp -= ap_sm;
                 t.cs.last_damage_time = now;

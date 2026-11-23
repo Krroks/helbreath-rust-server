@@ -1421,7 +1421,7 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   travels to it) and fight the monster a mate fights; a join request nobody waits for any more is forgotten (the server never clears it)
   and one repeated more than 3 times is refused.
 - hunting maps (`move-minutes`): `bot_roam_to` picks the map among every map up to 4 teleports away that has monsters it can beat,
-  weighted by monsters x strength / (1 + 3 x teleports), so the bots spread; every 20-60 minutes it picks another one.
+  weighted by monsters x strength / (1 + teleports cubed), so the bots stay near but spread; every 20-60 minutes it picks another one.
 - economy: a shop trip's cool-down is drawn per bot (0.5-1.5 x `shop-cooldown-ms`) and its first one at random; the potions it wants grow
   with the level (`potion_wants`); a worn armour piece is replaced by one at least a fifth and two points better.
 - quests (`quests`, `quest-minutes`): a citizen of level 11 or more asks the city hall (`COMMONTYPE_TALKTONPC` 4, on any town tile: the farms
@@ -1440,6 +1440,28 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   task only serves the published text. `serve.mjs` serves the page at `/bots` and proxies `/bots/api/*` to hg (5th argument = the port,
   8097 by default), so the page is `http://127.0.0.1:8080/bots` once `serve.mjs` has been restarted. A bot that has not connected since `hg`
   started shows no level until it does.
+- reacting to attacks (`react`): `combat.rs` calls `bots_note_hit` when a player hits a bot (melee and arrows; spells are not hooked);
+  after a moment of surprise (0.5-1.8 s by pace) the bot, by temper (`temper`: cautious / steady / bold, from the bot's number) and level,
+  fights back (`Mode::Defend`: the raid machinery with that player as the fixed target, a minute at most), or runs a few steps (and reads
+  a recall scroll when hurt and chased); it says something (a bank of short lines), calls its party (`$` chat) and party mates within
+  20 tiles come to help. A cautious bot fights what it can beat or to help a mate; a steady one up to 15 levels above; a bold one anything,
+  none of them under 40 % HP. Temper also moves the potion, recall and tiredness thresholds by 8 points (`temper_pct`).
+- mana and buffs (`mp-potion-percent`, `shop-mp-target`, `buff`): a caster drinks a blue potion below 25 % mana, buys them in the shop
+  (a mage keeps them out of the loot it sells), and casts a protection spell (Magic.cfg type 11) on itself before a fight, not while one
+  is on, at most every 30 s, with half its mana to spare; it learns the protection spells after the attack and healing ones.
+- life skill, fishing (`fishing`, `fish-minutes`, `fish-ms`): about a third of the bots are anglers (`hobby`): they buy a rod and the
+  manual (skill 20) and read it; every `fish-minutes` they go to a map with fish (within 3 teleports), walk to 8 tiles of the nearest
+  fish they can reach, cast at its water tile every 6-9 s, pull when the minigame's chance is high enough (`fish_chance`), and pick the
+  fish up; the clock starts on arrival, it ends hurt, with the rod used up or when no fish is left. Any step or pick-up cancels a cast on
+  the server (`clear_skill_using_status`), so nothing is sent while one is pending. Rods, manuals and other `STUDYSKILL` / `USE_SKILL`
+  items are never loot. Mining, farming and crafting are NOT done.
+- gold: when rich (`rich`, 20 000) a bot buys the best red potion it can pay for 30 of (`BigRedPotion`) and carries twice as many; a bot
+  with 8 000+ gold gives a tenth (4 000 at most) to a poor party mate within 3 tiles, every 10 minutes (`COMMONTYPE_GIVEITEMTOCHAR`).
+  The upgrade stones are not for sale (price < 0), so upgrading is not a sink; there is no bank.
+- people: friends (bots hunted with in a party, at most 5, invited first), a favourite map (the first ground it settles on, three
+  times the weight when it chooses a map), pauses on the road (1-3 % of the steps, not in a fight), one long trip in seven bends
+  through a point off the line, strolls during a break, a look round the shop before it leaves.
+- web page: also exp per hour and kills per hour (since it connected), deaths, temper, hobby and friends.
 Not yet: building, commanding or guild-teleport duties in a crusade, fight zones (they need a reservation and a ticket), guild ranks,
 other events (Heldenian, Apocalypse, Astoria).
 
