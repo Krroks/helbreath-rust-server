@@ -156,6 +156,8 @@ impl Game {
             self.gm_event_switch(h, cmd, 2);
         } else if p(b"/eventparty") {
             self.gm_event_switch(h, cmd, 3);
+        } else if p(b"/doubleexp") || p(b"/doubleek") {
+            self.gm_server_event(h, cmd);
         } else if p(b"/eventreset") {
             self.gm_event_reset(h);
         } else if p(b"/eventtp") {
@@ -621,6 +623,21 @@ impl Game {
     }
 
     /// AdminOrder_EventReset: every switch of the fight zone back to normal
+    /// v8.00 events (no C++ original), GM level 4: `/doubleexp [minutes]` / `/doubleek [minutes]`, 60 minutes by default, 0 stops it
+    fn gm_server_event(&mut self, h: usize, cmd: &[u8]) {
+        log(&format!("(gm) {}: {} (admin level {})", self.cname(h), l1(cmd), self.level(h)));
+        if self.level(h) < 4 {
+            return self.admin_low(h);
+        }
+        let ev = if cmd.starts_with(b"/doubleexp") { crate::events::EVENT_DOUBLE_EXP } else { crate::events::EVENT_DOUBLE_EK };
+        let arg = cmd.iter().position(|&b| b == b' ').map(|i| &cmd[i + 1..]).unwrap_or(b"");
+        let minutes = if arg.iter().all(|b| b.is_ascii_whitespace()) { 60 } else { crate::util::atoi(arg).clamp(0, 24 * 60) };
+        self.event_set(ev, minutes);
+        log(&format!("(gm) event {ev} set to {minutes} min, active: {}", self.event_active(ev)));
+        let who = self.cname(h);
+        self.gm_log(&format!("{who} {} {minutes} min", String::from_utf8_lossy(&cmd[..cmd.iter().position(|&b| b == b' ').unwrap_or(cmd.len())])));
+    }
+
     fn gm_event_reset(&mut self, h: usize) {
         let Some(m) = self.fightzone_gm(h) else { return };
         let illusion = self.maps[m].is_perm_illusion_on;

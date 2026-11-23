@@ -48,7 +48,15 @@ pub fn show_map_index(map: &[u8]) -> i32 {
     names.iter().position(|n| cstr(map) == *n).map_or(0, |i| i as i32 + 1)
 }
 
+/// How long after taking damage recall (spell) and teleporting scrolls stay locked: 20 s since v8.00 (the 3.82 server used 10 s).
+pub const DAMAGE_TELEPORT_LOCK_MS: u32 = 20_000;
+
 impl Game {
+    /// Took damage within `DAMAGE_TELEPORT_LOCK_MS` (a GM never counts).
+    pub fn damaged_recently(&self, h: usize) -> bool {
+        self.client(h).is_some_and(|c| !c.is_gm() && self.now().wrapping_sub(c.cs.last_damage_time) <= DAMAGE_TELEPORT_LOCK_MS)
+    }
+
     /// `SetItemCount` (by slot): 0 removes the item (ItemDepleteHandler), otherwise NOTIFY_SETITEMCOUNT.
     pub fn set_item_count(&mut self, h: usize, k: usize, count: u32) {
         let Some(c) = self.client_mut(h) else { return };
@@ -187,6 +195,11 @@ impl Game {
             }
             ITEMEFFECTTYPE_MAGIC => {
                 let (x, y, mi, map_name) = (c.x as i32, c.y as i32, c.map_index, c.map_name.clone());
+                // v8.00: the scrolls that teleport (recall scroll, tickets) wait 20 s after taking damage, like the recall spell
+                if matches!(v[0], 1 | 4) && self.damaged_recently(h) {
+                    self.notify(h, NOTIFY_NOTICEMSG, &[], Some(b"Scrolls cannot be used until 20 seconds after taking damage."));
+                    return;
+                }
                 self.remove_magic_effect(h, OWNERTYPE_PLAYER, MAGICTYPE_INVISIBILITY);
                 let fight_zone = self.maps[mi].is_fight_zone;
                 match v[0] {
@@ -292,9 +305,12 @@ impl Game {
             return true;
         }
         let color = it.cfg.item_effect_value[0];
+        let worn = (0..MAXITEMS as i32).contains(&dest) && c.is_item_equipped[dest as usize];
         // fix: the C++ used the dye up when the target slot was out of range or empty
         let Some(d) = (0..MAXITEMS as i32).contains(&dest).then(|| c.items[dest as usize].as_mut()).flatten() else { return false };
-        if d.cfg.category == 11 || d.cfg.category == 12 {
+        // v8.00: weapons and armour can be dyed too ("This item can be dyed."), when not worn (the look is only rebuilt on equipping)
+        let dyeable = !worn && matches!(d.cfg.equip_pos, EQUIPPOS_HEAD | EQUIPPOS_BODY | EQUIPPOS_ARMS | EQUIPPOS_PANTS | EQUIPPOS_LEGGINGS | EQUIPPOS_LHAND | EQUIPPOS_RHAND | EQUIPPOS_TWOHAND | EQUIPPOS_BACK);
+        if d.cfg.category == 11 || d.cfg.category == 12 || dyeable {
             d.item_color = color as u8;
             self.notify(h, NOTIFY_ITEMCOLORCHANGE, &[dest, color & 0xFF], None);
             true

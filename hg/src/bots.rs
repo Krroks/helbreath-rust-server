@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::unbounded_channel;
 
 /// Set by the game when it takes connections: before that `bAccept` drops them.
 pub static READY: AtomicBool = AtomicBool::new(false);
@@ -120,6 +120,7 @@ pub struct BotCfg {
     pub party_follow: bool,
     pub quests: bool,
     pub guilds: bool,
+    pub web_port: u16,
     pub crusade: bool,
     pub quest_minutes: u32,
     pub move_minutes: (u32, u32),
@@ -203,6 +204,7 @@ impl Default for BotCfg {
             party_follow: true,
             quests: true,
             guilds: true,
+            web_port: 8097,
             crusade: true,
             quest_minutes: 8,
             move_minutes: (20, 60),
@@ -303,6 +305,7 @@ quest-minutes        = 8          // least time between two quests (a quest that
 guilds               = 1          // citizens put points in charisma (the Login asks 20 and level 20 for a guild); the first one ready founds a guild in a town, the
                                   // others of its nation join it (the master approves). They skip the ticket item: the server routine that giving the ticket runs is called
 crusade              = 1          // during a crusade a citizen of level 10 or more takes the fighter duty and raids the enemy more often
+web-port             = 8097       // 127.0.0.1:port serves the bots as JSON (/api/bots, /api/map/<name>) for the page http://127.0.0.1:8080/bots (serve.mjs proxies it); 0 = off; read at start only
 roam                 = 1          // with no monster in sight for roam-idle-ms it walks to a hunting ground (possibly through teleports)
 roam-idle-ms         = 8000
 hunt-level-step      = 6          // it fights monsters of HitDice up to 2 + level / this (0 = any): level 1 slimes, 12 orcs, 24 scorpions
@@ -393,6 +396,7 @@ impl BotCfg {
                         warn.push(format!("move-minutes wants two numbers like 20,60, got '{v}'"));
                     }
                 }
+                ("web-port", Some(x)) => c.web_port = x.clamp(0, 65535) as u16,
                 ("guilds", _) if flag.is_some() => c.guilds = flag.unwrap(),
                 ("crusade", _) if flag.is_some() => c.crusade = flag.unwrap(),
                 ("quest-minutes", Some(x)) => c.quest_minutes = x.max(1) as u32,
@@ -637,16 +641,44 @@ pub struct Bot {
     pub kills: u32,
 }
 
+/// What the web page shows of a bot that is offline: how it was when it was last seen.
+#[derive(Clone, Default)]
+struct BotView {
+    level: i32,
+    exp: u32,
+    side: i32,
+    guild: String,
+    rank: i32,
+    map: String,
+    x: i16,
+    y: i16,
+    seen: u64,
+}
+
+struct ChatLine {
+    t: u64,
+    map: String,
+    from: String,
+    to: String,
+    text: String,
+    bot: bool,
+}
+
 #[derive(Default)]
 pub struct Bots {
     pub list: Vec<Bot>,
     pub cfg: Arc<BotCfg>,
     /// bots that were asked to put the weapons away (combat mode off) until a time: a party invitation needs it
     pub peace: Vec<(String, u32)>,
+    /// for the web page: the last known look of each bot, the chat of the last hour (bots and the players that talk to them) and the published JSON
+    views: Vec<BotView>,
+    chat_log: std::collections::VecDeque<ChatLine>,
+    pub web: Option<crate::bots_web::Web>,
+    next_publish: u32,
     /// what it is going to say: bot number, whisper to (the player's name), the text, when
     chat_q: Vec<(usize, Option<String>, String, u32)>,
     /// to start the tasks of bots added while it runs; where the config file is, when it was last read, the next look
-    pub ev: Option<UnboundedSender<Ev>>,
+    pub ev: Option<net::EvTx>,
     pub cfg_path: String,
     pub cfg_mtime: Option<std::time::SystemTime>,
     next_reload: u32,
@@ -729,6 +761,10 @@ fn chat_kind(text: &str, named: bool, whispered: bool) -> Option<(bool, u8)> {
     (hello || named || whispered).then_some((english, kind))
 }
 
+fn li_map(g: &Game, h: usize) -> usize {
+    g.clients[h].as_ref().map_or(0, |c| c.map_index)
+}
+
 fn pick(bank: &[&'static str], r: i32) -> &'static str {
     bank[(r.max(1) as usize - 1) % bank.len()]
 }
@@ -750,7 +786,7 @@ fn offline_until(n: usize) -> u64 {
     OFFLINE.lock().unwrap().get(n).copied().unwrap_or(0)
 }
 
-fn unix_ms() -> u64 {
+pub fn unix_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
@@ -802,7 +838,7 @@ async fn login(addr: &str, acc: &[u8], ch: &[u8], pwd: &[u8], look: [u8; 5], sta
 }
 
 /// Keeps one bot connected: log in, hand the game a fake connection, wait until the game drops it, try again.
-pub async fn run_bot(n: usize, cfg: Arc<BotCfg>, acc: String, ch: String, ev: UnboundedSender<Ev>) {
+pub async fn run_bot(n: usize, cfg: Arc<BotCfg>, acc: String, ch: String, ev: net::EvTx) {
     tokio::time::sleep(Duration::from_millis(cfg.login_spread_ms * n as u64)).await; // spread the logins
     let pwd = cfg.password.as_bytes();
     loop {
@@ -820,10 +856,10 @@ pub async fn run_bot(n: usize, cfg: Arc<BotCfg>, acc: String, ch: String, ev: Un
         let conn = net::new_conn_id();
         let (tx, mut rx) = unbounded_channel();
         // a distinct "address" per bot: bAccept allows 2 connections per IP
-        let _ = ev.send(Ev::Accept { conn, ip: format!("bot-{n}").into_bytes(), tx });
+        let _ = ev.send(Ev::Accept { conn, ip: format!("bot-{n}").into_bytes(), tx }).await;
         let mut b = body(MSGID_REQUEST_INITPLAYER, 0, &[(ch.as_bytes(), 10), (acc.as_bytes(), 10), (pwd, 10), (b"", 1), (b"WS1", 20)], 58);
         b.truncate(58);
-        let _ = ev.send(Ev::Read { conn, key: 0, body: b });
+        let _ = ev.send(Ev::Read { conn, key: 0, body: b }).await;
         while rx.recv().await.is_some() {} // the game's answers are not read: the brain looks at the world itself
         log(&format!("(bot) {ch}: connection closed by the game, back in {} ms", cfg.relogin_ms));
         tokio::time::sleep(Duration::from_millis(cfg.relogin_ms)).await;
@@ -1099,6 +1135,7 @@ impl Game {
             log(&self.bots_summary());
         }
         self.bots_chat_process(now);
+        self.bots_publish(now);
         let paused = self.bots.paused || self.bots.cfg.paused;
         for i in 0..self.bots.list.len() {
             if now.wrapping_sub(self.bots.list[i].next_think) as i32 >= 0 {
@@ -1132,6 +1169,8 @@ impl Game {
         let Some(n) = self.bots.list.iter().position(|b| b.ch == lname) else { return };
         let text = String::from_utf8_lossy(crate::util::cstr(&d[21..])).to_string();
         let whisper = mode == 20;
+        let map = String::from_utf8_lossy(&self.maps[li_map(self, listener)].name).to_string();
+        self.bots_note_chat(&sname, if whisper { &lname } else { "" }, &text, false, &map);
         let Some((english, kind)) = chat_kind(&text, text.to_lowercase().contains(&lname.to_lowercase()), whisper) else { return };
         if self.bots.chat_q.iter().any(|q| q.0 == n) {
             return;
@@ -1154,6 +1193,18 @@ impl Game {
         self.bots.chat_q.push((n, whisper.then_some(sname), pick(bank, r).to_string(), now.wrapping_add(delay)));
     }
 
+    /// One chat line for the web page (the last 300): `bot` = a bot said it. The same line heard by several bots is kept once.
+    fn bots_note_chat(&mut self, from: &str, to: &str, text: &str, bot: bool, map: &str) {
+        let t = crate::bots::unix_ms();
+        if self.bots.chat_log.iter().rev().take(20).any(|l| l.from == from && l.text == text && t.saturating_sub(l.t) < 1500) {
+            return;
+        }
+        self.bots.chat_log.push_back(ChatLine { t, map: map.to_string(), from: from.to_string(), to: to.to_string(), text: text.to_string(), bot });
+        while self.bots.chat_log.len() > 300 {
+            self.bots.chat_log.pop_front();
+        }
+    }
+
     /// The bot says `text` (nearby, or as a whisper to `to`): the same frame a client sends, through the chat handler.
     fn bot_say(&mut self, h: usize, to: Option<&str>, text: &str) {
         let Some(c) = self.clients[h].as_ref() else { return };
@@ -1173,6 +1224,8 @@ impl Game {
             let c = self.clients[h].as_mut().unwrap();
             (c.whisper_player_index, c.whisper_player_name) = (j as i32, crate::util::cstr(&name).to_vec());
         }
+        let (from, map) = self.clients[h].as_ref().map_or((String::new(), String::new()), |c| (String::from_utf8_lossy(crate::util::cstr(&c.char_name)).to_string(), String::from_utf8_lossy(&self.maps[c.map_index].name).to_string()));
+        self.bots_note_chat(&from, to.unwrap_or(""), text, true, &map);
         self.chat_msg(h, &f);
         if let Some(c) = self.clients[h].as_mut() {
             (c.whisper_player_index, c.whisper_player_name) = (-1, Vec::new());
@@ -1227,6 +1280,97 @@ impl Game {
                 self.bots.chat_q.push((b.n, None, pick(bank, r).to_string(), now.wrapping_add(delay)));
             }
         }
+    }
+
+    /// Every 2 s: the JSON the web side serves (`bots_web.rs`): every bot with what it was when last seen, the maps that have bots
+    /// (with their walkability bitmaps, made once) and the last chat lines.
+    fn bots_publish(&mut self, now: u32) {
+        use crate::bots_web::{base64, json_str};
+        let Some(web) = self.bots.web.clone() else { return };
+        if now.wrapping_sub(self.bots.next_publish) as i32 <= 0 {
+            return;
+        }
+        self.bots.next_publish = now.wrapping_add(2000);
+        let t = unix_ms();
+        let mut views = std::mem::take(&mut self.bots.views);
+        views.resize(self.bots.list.len(), BotView::default());
+        let mut per_map = vec![0u32; self.maps.len()];
+        let side_name = |s: i32| match s {
+            ARESDEN => "aresden",
+            ELVINE => "elvine",
+            _ => "neutral",
+        };
+        let mut rows: Vec<String> = Vec::new();
+        for (i, b) in self.bots.list.iter().enumerate() {
+            let mut live = String::new();
+            if let Some(h) = self.bot_handle(&b.ch) {
+                let c = self.clients[h].as_ref().unwrap();
+                per_map[c.map_index] += 1;
+                views[i] = BotView {
+                    level: c.level,
+                    exp: c.exp,
+                    side: c.side,
+                    guild: String::from_utf8_lossy(crate::util::cstr(&c.guild_name)).to_string(),
+                    rank: c.guild_rank,
+                    map: String::from_utf8_lossy(&self.maps[c.map_index].name).to_string(),
+                    x: c.x,
+                    y: c.y,
+                    seen: t,
+                };
+                live = format!(",\"hp\":{},\"maxhp\":{},\"mp\":{},\"maxmp\":{},\"gold\":{},\"party\":{},\"quest\":{}", c.hp, c.get_max_hp(), c.mp, c.get_max_mp(), self.item_count(h, b"Gold").1, self.party_members(c.party_id).len(), c.quest);
+            }
+            let v = &views[i];
+            let guild = if v.guild.is_empty() || v.guild.starts_with("NONE") { "" } else { v.guild.as_str() };
+            rows.push(format!(
+                "{{\"n\":{},\"online\":{},\"level\":{},\"exp\":{},\"nation\":\"{}\",\"guild\":{},\"rank\":{},\"class\":\"{}\",\"pace\":\"{}\",\"mode\":\"{:?}\",\"map\":{},\"x\":{},\"y\":{},\"kills\":{},\"deaths\":{},\"seen\":{}{live}}}",
+                json_str(&b.ch),
+                !live.is_empty(),
+                v.level,
+                v.exp,
+                side_name(v.side),
+                json_str(guild),
+                v.rank,
+                ["warrior", "mage", "knight", "duelist", "archer"][(b.arch as usize).min(4)],
+                PACES[b.pace.min(2)].name,
+                b.mode,
+                json_str(&v.map),
+                v.x,
+                v.y,
+                b.kills,
+                b.deaths,
+                v.seen
+            ));
+        }
+        self.bots.views = views;
+        // the maps that have bots: size, count, and the walkability bitmap once
+        let mut maps: Vec<String> = Vec::new();
+        let mut made: Vec<(String, String)> = Vec::new();
+        {
+            let w = web.lock().unwrap();
+            for (m, &n) in per_map.iter().enumerate().filter(|(_, n)| **n > 0) {
+                let mp = &self.maps[m];
+                let name = String::from_utf8_lossy(&mp.name).to_string();
+                maps.push(format!("{{\"name\":{},\"w\":{},\"h\":{},\"count\":{n}}}", json_str(&name), mp.size_x, mp.size_y));
+                if !w.maps.contains_key(&name) {
+                    let (sx, sy) = (mp.size_x.max(0) as usize, mp.size_y.max(0) as usize);
+                    let mut bits = vec![0u8; (sx * sy).div_ceil(8)];
+                    for y in 0..sy {
+                        for x in 0..sx {
+                            if mp.get_moveable(x as i16, y as i16).0 {
+                                bits[(y * sx + x) / 8] |= 1 << ((y * sx + x) % 8);
+                            }
+                        }
+                    }
+                    let tps: Vec<String> = mp.teleport_locs.iter().map(|t| format!("[{},{},{}]", t.src.0, t.src.1, json_str(&String::from_utf8_lossy(&t.dest_map)))).collect();
+                    made.push((name.clone(), format!("{{\"name\":{},\"w\":{sx},\"h\":{sy},\"bits\":\"{}\",\"teleports\":[{}]}}", json_str(&name), base64(&bits), tps.join(","))));
+                }
+            }
+        }
+        let chat: Vec<String> = self.bots.chat_log.iter().rev().take(150).rev().map(|l| format!("{{\"t\":{},\"map\":{},\"from\":{},\"to\":{},\"text\":{},\"bot\":{}}}", l.t, json_str(&l.map), json_str(&l.from), json_str(&l.to), json_str(&l.text), l.bot)).collect();
+        let body = format!("{{\"t\":{t},\"paused\":{},\"bots\":[{}],\"maps\":[{}],\"chat\":[{}]}}", self.bots.paused || self.bots.cfg.paused, rows.join(","), maps.join(","), chat.join(","));
+        let mut w = web.lock().unwrap();
+        w.bots = body;
+        w.maps.extend(made);
     }
 
     /// Reads Bots.cfg again when its time changed: the new values replace the old ones at once, bots are added (their tasks

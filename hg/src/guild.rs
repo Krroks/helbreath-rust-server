@@ -19,10 +19,10 @@ pub enum GuildReq {
 }
 
 /// RequestCreateNewGuildHandler's requirements (level, charisma, side, town). `name` is the guild name asked for.
-pub fn can_create_guild(level: i32, chr: i32, neutral: bool, in_town: bool, name: &[u8]) -> bool {
+pub fn can_create_guild(level: i32, min_level: i32, chr: i32, neutral: bool, in_town: bool, name: &[u8]) -> bool {
     let name = cstr(name);
     // fix: the C++ accepted an empty name and "NONE" (the guild name of every guildless player)
-    level >= 20 && chr >= 20 && !neutral && in_town && !name.is_empty() && !name.starts_with(b"NONE")
+    level >= min_level && chr >= 20 && !neutral && in_town && !name.is_empty() && !name.starts_with(b"NONE")
 }
 
 /// The ticket checks of GiveItemHandler: `giver` = (guild rank, guild name, side, neutral), `master` the same.
@@ -96,7 +96,7 @@ impl Game {
             log(&format!("(!)Cannot create guild! Already guild member.: CharName({})", crate::util::l1(&c.char_name)));
             return;
         }
-        if !can_create_guild(c.level, c.range, c.is_neutral(), c.is_on_town_nonpk, &name) {
+        if !can_create_guild(c.level, self.settings.guild_min_level, c.range, c.is_neutral(), c.is_on_town_nonpk, &name) {
             self.guild_reply(h, MSGID_RESPONSE_CREATENEWGUILD, false);
             return;
         }
@@ -347,13 +347,15 @@ mod tests {
 
     #[test]
     fn create_requirements() {
-        assert!(can_create_guild(20, 20, false, true, b"rtguild"));
-        assert!(!can_create_guild(19, 20, false, true, b"rtguild"));
-        assert!(!can_create_guild(20, 19, false, true, b"rtguild"));
-        assert!(!can_create_guild(20, 20, true, true, b"rtguild"));
-        assert!(!can_create_guild(20, 20, false, false, b"rtguild"));
-        assert!(!can_create_guild(20, 20, false, true, b"NONE"));
-        assert!(!can_create_guild(20, 20, false, true, b""));
+        assert!(can_create_guild(20, 20, 20, false, true, b"rtguild"));
+        assert!(!can_create_guild(19, 20, 20, false, true, b"rtguild"));
+        assert!(!can_create_guild(20, 20, 19, false, true, b"rtguild"));
+        assert!(!can_create_guild(20, 20, 20, true, true, b"rtguild"));
+        assert!(!can_create_guild(20, 20, 20, false, false, b"rtguild"));
+        assert!(!can_create_guild(20, 20, 20, false, true, b"NONE"));
+        assert!(!can_create_guild(20, 20, 20, false, true, b""));
+        assert!(!can_create_guild(79, 80, 20, false, true, b"rtguild")); // guild-min-level = 80 (the v8.00 text)
+        assert!(can_create_guild(80, 80, 20, false, true, b"rtguild"));
     }
 
     #[test]

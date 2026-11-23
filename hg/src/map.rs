@@ -12,6 +12,13 @@ pub const MAXINITIALPOINT: usize = 20;
 pub const MAXNMR: usize = 50;
 pub const MAXWAYPOINTCFG: usize = 200;
 
+const BLOCK_SHIFT: u32 = 3;
+
+/// First coordinate of the block after the one holding `v` (for stepping over an empty block).
+pub fn next_block(v: i16) -> i16 {
+    ((v >> BLOCK_SHIFT) + 1) << BLOCK_SHIFT
+}
+
 #[derive(Clone, Default)]
 pub struct Tile {
     pub owner: i16,
@@ -87,6 +94,8 @@ pub struct Map {
     pub size_y: i16,
     pub tile_data_size: i16,
     pub tiles: Vec<Tile>,
+    /// Tiles holding a live owner, per 8x8 block (`BLOCK_SHIFT`): the NPC scans skip the empty blocks.
+    occ: Vec<u16>,
     pub teleport_locs: Vec<TeleportLoc>,
     pub initial_points: Vec<Option<(i16, i16)>>,
     pub no_attack_rects: Vec<(i32, i32, i32, i32)>,
@@ -172,6 +181,7 @@ impl Map {
             size_y,
             tile_data_size: 0,
             tiles: vec![t; n],
+            occ: vec![0; ((size_x.max(0) as usize + 7) >> BLOCK_SHIFT) * ((size_y.max(0) as usize + 7) >> BLOCK_SHIFT)],
             teleport_locs: Vec::new(),
             initial_points: vec![None; MAXINITIALPOINT],
             no_attack_rects: Vec::new(),
@@ -295,10 +305,31 @@ impl Map {
         self.idx(x, y).map(|i| &mut self.tiles[i])
     }
 
+    fn occ_add(&mut self, x: i16, y: i16, d: i32) {
+        let b = (x >> BLOCK_SHIFT) as usize + (y >> BLOCK_SHIFT) as usize * ((self.size_x as usize + 7) >> BLOCK_SHIFT);
+        self.occ[b] = (self.occ[b] as i32 + d) as u16;
+    }
+
+    /// No live owner anywhere in the 8x8 block of (x, y) (also true outside the map).
+    pub fn block_empty(&self, x: i16, y: i16) -> bool {
+        !self.valid(x, y) || self.occ[(x >> BLOCK_SHIFT) as usize + (y >> BLOCK_SHIFT) as usize * ((self.size_x as usize + 7) >> BLOCK_SHIFT)] == 0
+    }
+
     pub fn set_owner(&mut self, owner: i16, class: u8, x: i16, y: i16) {
-        if let Some(t) = self.tile_mut(x, y) {
-            t.owner = owner;
-            t.owner_class = class;
+        let Some(i) = self.idx(x, y) else { return };
+        let was = self.tiles[i].owner != 0;
+        self.tiles[i].owner = owner;
+        self.tiles[i].owner_class = class;
+        if was != (owner != 0) {
+            self.occ_add(x, y, if was { -1 } else { 1 });
+        }
+    }
+    /// Drops a live owner that no longer exists (the tile keeps its other fields).
+    pub fn clear_stale_owner(&mut self, x: i16, y: i16) {
+        let Some(i) = self.idx(x, y) else { return };
+        if self.tiles[i].owner != 0 {
+            self.tiles[i].owner = 0;
+            self.occ_add(x, y, -1);
         }
     }
     pub fn set_dead_owner(&mut self, owner: i16, class: u8, x: i16, y: i16) {
@@ -316,15 +347,19 @@ impl Map {
     }
     /// `ClearOwner`: clears the live and the dead slot when they hold this owner.
     pub fn clear_owner(&mut self, owner: i16, class: u8, x: i16, y: i16) {
-        if let Some(t) = self.tile_mut(x, y) {
-            if t.owner == owner && t.owner_class == class {
-                t.owner = 0;
-                t.owner_class = 0;
-            }
-            if t.dead_owner == owner && t.dead_owner_class == class {
-                t.dead_owner = 0;
-                t.dead_owner_class = 0;
-            }
+        let Some(i) = self.idx(x, y) else { return };
+        let t = &mut self.tiles[i];
+        let live = t.owner == owner && t.owner_class == class && owner != 0;
+        if t.owner == owner && t.owner_class == class {
+            t.owner = 0;
+            t.owner_class = 0;
+        }
+        if t.dead_owner == owner && t.dead_owner_class == class {
+            t.dead_owner = 0;
+            t.dead_owner_class = 0;
+        }
+        if live {
+            self.occ_add(x, y, -1);
         }
     }
     pub fn clear_dead_owner(&mut self, x: i16, y: i16) {
@@ -673,6 +708,24 @@ mod tests {
         m.clear_owner(5, OWNERTYPE_PLAYER, 25, 25);
         assert_eq!(m.get_owner(25, 25), (0, 0));
         m.set_owner(1, 1, -1, 3); // ignored
+    }
+
+    #[test]
+    fn occupied_blocks() {
+        let mut m = Map::new(b"x", 50, 50);
+        assert!(m.block_empty(25, 25) && m.block_empty(-1, 3) && m.block_empty(60, 3));
+        m.set_owner(5, OWNERTYPE_PLAYER, 25, 25);
+        m.set_owner(6, OWNERTYPE_NPC, 25, 25); // overwrites: still one
+        assert!(!m.block_empty(24, 24) && !m.block_empty(31, 31) && m.block_empty(32, 24));
+        m.clear_owner(5, OWNERTYPE_PLAYER, 25, 25); // not the owner: nothing changes
+        assert!(!m.block_empty(25, 25));
+        m.clear_owner(6, OWNERTYPE_NPC, 25, 25);
+        assert!(m.block_empty(25, 25));
+        m.set_owner(7, OWNERTYPE_NPC, 49, 49);
+        m.clear_stale_owner(49, 49);
+        m.clear_stale_owner(49, 49);
+        assert!(m.block_empty(49, 49));
+        assert_eq!((next_block(7), next_block(8), next_block(-3)), (8, 16, 0));
     }
 
     #[test]

@@ -209,6 +209,14 @@ pub struct Client {
     pub hunger_status: i32,
     pub super_attack_left: i32,
     pub time_left_shutup: i32,
+    /// v8.00 starter bonus (events.rs): minutes of play left with Double EXP + Double EK; saved in the top byte of LeftShutupTime
+    pub newbie_min: i32,
+    /// `Game::now` of the last MSGID_REQUEST_TYPING accepted (a client may not flood its neighbours)
+    pub typing_time: u32,
+    /// v8.00 client toggles, effective values: UI_TYPING | UI_LOWHEALTH | UI_ITEMNAMES (saved in the top bits of `LeftPopTime`)
+    pub ui_flags: u8,
+    /// `Game::now` of the last minute taken off `newbie_min` (0 = not started)
+    pub newbie_time: u32,
     pub time_left_rating: i32,
     pub time_left_force_recall: i32,
     pub time_left_firm_stamina: i32,
@@ -378,6 +386,10 @@ impl Client {
             hunger_status: 100,
             super_attack_left: 0,
             time_left_shutup: 0,
+            newbie_min: 0,
+            typing_time: 0,
+            ui_flags: crate::events::UI_DEFAULT,
+            newbie_time: 0,
             time_left_rating: 0,
             time_left_force_recall: 0,
             time_left_firm_stamina: 0,

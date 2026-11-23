@@ -266,6 +266,10 @@ pub const NOTIFY_EVENTTP: i32 = 3083;
 pub const NOTIFY_EVENTILLUSION: i32 = 3084;
 pub const NOTIFY_RELICPOSITION: i32 = 3085;
 pub const NOTIFY_TELEPORT_REJECTED: i32 = 3086;
+// v8.00 event icons (no C++ original; also in Shared/NetMessages.h): u32 seconds left of Double EXP, u32 of Double EK (0 = off)
+pub const NOTIFY_SERVEREVENTS: i32 = 3087;
+// v8.00 client toggles (/typing, /lowhealth, /itemnames) kept with the character: the server sends them on entering (also in Shared/NetMessages.h)
+pub const NOTIFY_CLIENTFLAGS: i32 = 3088;
 pub const NOTIFY_SLATECLEAR: i32 = 99;
 pub const COMMONTYPE_REQ_CREATESLATE: i32 = 2657;
 pub const MSGID_REQUEST_INITPLAYER: u32 = 0x504020e;
@@ -412,6 +416,14 @@ pub const MSGID_REQUEST_CHECKACCOUNTPASSWORD: u32 = 0x2654203d;
 pub const MSGID_WORLDSERVERACTIVATED: u32 = 0x27049d0f;
 pub const MSGID_REQUEST_PANNING: u32 = 0x27b314d3;
 pub const MSGID_RESPONSE_PANNING: u32 = 0x27b314d4;
+// Added for the v8.00 "ground item names" option (no C++ original): see items.rs and PORTING.md. Also in Shared/NetMessages.h.
+pub const MSGID_REQUEST_GROUNDITEMNAMES: u32 = 0x27b314e3;
+pub const MSGID_RESPONSE_GROUNDITEMNAMES: u32 = 0x27b314e4;
+// v8.00 "someone is typing" bubble (no C++ original; also in Shared/NetMessages.h): the client says it starts / stops typing a chat line,
+// the server tells the players around it
+pub const MSGID_REQUEST_TYPING: u32 = 0x27b314e5;
+pub const MSGID_EVENT_TYPING: u32 = 0x27b314e8;
+pub const MSGID_REQUEST_CLIENTFLAGS: u32 = 0x27b314ea;
 pub const MSGID_REQUEST_RESTART: u32 = 0x28010ef1;
 pub const MSGID_RESPONSE_REGISTER_WORLDSERVERSOCKET: u32 = 0x280120a3;
 pub const MSGID_REQUEST_BLOCKACCOUNT: u32 = 0x2900ad13;

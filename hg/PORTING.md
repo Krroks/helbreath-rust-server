@@ -146,6 +146,61 @@ client has and the 3.82-based one lacked. The original client never sends them, 
   dispatch in game.rs, constants in consts.rs and `Shared/NetMessages.h`. Why a request and not a field of ITEMDROP: that event is a fixed
   18-byte frame the 3.82 client parses, and tiles already holding an item at map init would need their own message anyway.
 
+- **Double EXP / Double EK events** (v8.00 event icons, `events.rs`): a GM of level 4 runs `/doubleexp [minutes]` or `/doubleek [minutes]`
+  (60 by default, 0 stops it, at most 24 h; the command is logged to the Login like the other GM orders). While Double EXP runs, `get_exp`
+  doubles the exp of monster kills before the party share; while Double EK runs, `enemy_kill_reward` adds twice the EK
+  (`enemy_kill_adjust` x 2). Everybody gets a notice ("Double Experience Event has started!" / "...Enemy Kill Event has ended!") and
+  `NOTIFY_SERVEREVENTS` (0x0C0C + modifier 3 = 3087: `[u32 seconds left of Double EXP][u32 of Double EK]`, 0 = not running), which the
+  client draws as the EXP / EK badges; the same message goes to a player when it enters the game. The 4 s timer (`events_tick`) ends them.
+  Not persisted: a restart of `hg` ends any running event. Not applied: the exp of PvP kills (`enemy_kill_reward`'s reward), quests and
+  potions. Test: `events::tests::seconds_left` (the clock arithmetic); the rest is untested against a live client.
+
+- **Login: sessions of a dead game server** (`drop_sessions_of_server` in login/src/server.rs, a fix of the C++ Login): when an HG
+  closes or a new one registers in its slot, the accounts bound to it are dropped, and a force-disconnect for an account whose server is
+  gone ends the session at once. Before, a restarted HG left every player "in use" for good (the C++ kept playing clients of a lost
+  server) and the client's "Would you like to interrupt the connection?" -> Yes did nothing. Needs the Login restarted to take effect.
+
+- **Login: account validity flag and bans** (login/src/server.rs): the "account valid" byte of the character list was inverted in the C++
+  (`IsAccountValid` answered true for an expired `ValidDate`), so accounts inside their 30 days read "Your Account is not vaild...";
+  it is now true while `ValidDate` has not passed. New, no original: an account whose `BlockDate` lies in the future is banned; the
+  character list then carries byte 12 = 1 and, after the 8 bytes of time left, the text "until <date>: <BanReason>" (new column
+  `account_database.BanReason varchar(100)`, in `Run_Me.sql`; without the column nobody is banned), which the character screen shows in
+  red, and entering the game is refused with ENTERGAMERESTYPE_REJECT type 8. Ban an account:
+  `UPDATE account_database SET BlockDate='2027-01-01 00:00:00', BanReason='cheating' WHERE name='X';` (`BlockDate='0000-00-00 00:00:00'`
+  lifts it). Needs the Login restarted. Untested against a live client.
+
+- **v8.00 rules** (2026-11-23): (1) travellers stop at level **20** (`traveler_cap_level` in life.rs; "Travelers cannot level up to 21"); a
+  traveller already above 20 keeps the old limit of 50. The old probe note "travellers stop at 50" (items/leftovers scenarios) now holds
+  only for characters above 20. (2) Recall (the spell) and the teleporting scrolls (recall scroll, tickets) are refused for **20 s** after
+  taking damage (`damaged_recently`, was 10 s for the spell only; GMs are exempt); a scroll answers with a notice and is not used up.
+  (3) The minimum level to create a guild is **`guild-min-level`** in Settings.cfg (default 20, as before; the v8.00 text says 80).
+
+- **Typing bubble** (v8.00 "someone is typing", client `/typing`): `MSGID_REQUEST_TYPING` (0x27B314E2 + modifier 3 = 0x27b314e5;
+  client sends `[id u32][type u16][state u8]`, 1 = starts typing a chat line, 0 = stops, repeated every 4 s while it lasts) is relayed
+  by `request_typing` (chat.rs, test `typing_event_layout`) as `MSGID_EVENT_TYPING` (0x27b314e8: `[id][type][name 10][state u8]`) to the players
+  within VIEW_NEAR_X x VIEW_NEAR_Y on the same map; one request per second per client is accepted (`typing_time`). The client keeps
+  name -> expiry (7 s) and draws `Typing.pak` over the head. The mute list of the client already hid the chat of muted players; the
+  bubble is not filtered by it. Untested against a live client.
+
+- **Login: lock after too many wrong passwords** (login/src/server.rs, `Fails`): 5 wrong passwords within 10 minutes lock the account
+  for 30 minutes (`ACCOUNT_MAX_FAILS`, `FAIL_WINDOW_MS`, `ACCOUNT_LOCK_MS`). While locked,
+  even the right password is refused with LOGRESMSGTYPE_ACCOUNTLOCKED (0x0F31, `[minutes left]`), the client shows a result screen
+  "K"; a successful login clears the count. The lock is also written to the database as a ban of 30 minutes (`BlockDate` + 30 min,
+  `BanReason` = "Too many wrong passwords", only when the account is not banned already; needs the `BanReason` column) and every login
+  checks it, so it survives a restart of the Login; lift it with `BlockDate='0000-00-00 00:00:00'`. The count of failures stays in
+  memory. Tests: `wrong_passwords_lock_the_account`, `saved_lock_minutes`.
+
+- **Client toggles kept with the character** (`/typing`, `/lowhealth`, `/itemnames`): the client sends `MSGID_REQUEST_CLIENTFLAGS`
+  (0x27B314E7 + 3 = 0x27b314ea, `[id][type][flags u8]`: 1 typing, 2 low-health warning, 4 item names) whenever one changes and the server
+  answers on entering with `NOTIFY_CLIENTFLAGS` (0x0C0D + 3 = 3088, one u32). Stored in bits 24-26 of the `LeftPopTime` column (no
+  schema change, like the starter bonus in `LeftShutupTime`; `events::split_rating` / `join_rating`), written with the next save;
+  bits 0-1 are stored inverted, so old rows (0) mean typing ON, low health ON, item names OFF. Test `rating_and_ui_flags_share_a_u32`.
+
+- **Dyes** (v8.00): a dye (`item_use.rs`) now also colours weapons and armour (equip_pos head, body, arms, pants, leggings, hands, back),
+  as long as the item is not worn (the look is rebuilt only when equipping); the client tooltip says "This item can be dyed.".
+
+- **Mobs**: Scarecrow (type 92) and Princess (type 102) sprites loaded from the v8.00 paks (client only, no server change).
+
 ## Gameplay-visible fixes (the owner decides)
 
 - CLIENTTIMEOUT_MS (silent drop of a client that sends nothing) raised from 18 s to 60 s (2026-11-22): the web client in a background tab sends its 8 s CHECKCONNECTION about once a second at best and was dropped while idle. The drop now logs `Client(name) timed out`. The same constant bounds the speed-hack time gap in `check_connection`.
@@ -1177,6 +1232,14 @@ map a weather later, and `/weather` does nothing on a map that has one).
 
 Regressions (Rust login + Rust HG, after this change): play 22/22, fight 23/23, pvp 37/37, magic 27/27, quest 22/22, party 17/17, crusade 19/19, gm 25/25, fightzone 12/12, deaths 23/23, farming 15/15, recallpoint 8/8, heldenian 32/32, apocalypse 20/20, astoria 16/16, leftovers2 71/71, leftovers3 56/56, gm382 54/54 (no timing flake). Unit tests: 79 hg + 21 login.
 
+## Widescreen ranges and anti-lag changes (2026-11-23)
+
+- Fix (16:9 client, gameplay-visible): normal chat (`chat_msg`, CHAT_NORMAL) reaches players within `VIEW_NEAR_X` x `VIEW_NEAR_Y` (was x+-10 / y+-7 exclusive in the C++), the same box as the typing bubble.
+- Fix (16:9 client, gameplay-visible): the casting range check in `magic.rs` allows `VIEW_NEAR_X` columns (was 11 in both axes): the client shows targets up to 14 columns away and has no range limit of its own. Rows stay at 11 (the window shows 8). Ground-item events keep `y+-8` (window half).
+- Not checked: the INITDATA header (`x - 14 - 5`, `y - 12 - 5`, entry.rs) against the tile block that starts at `x - VIEW_LEFT`; it is inherited from the C++, look at how the client reads those fields before calling it a mismatch.
+- Rust only, no behaviour change: `log.rs` formats and queues lines, a writer thread owns stdout and `Events.log` (opened once; a full queue drops lines; `log::flush()` / `log::exit()` before the process ends). `net.rs`: the event channel into the world is bounded (`EV_CAP`, sockets wait when the world is behind); a client with more than `OUT_MAX` frames queued, or whose write stalls for `WRITE_STALL`, is dropped; every pending frame of a client goes out in one write (TCP) or one flush (WebSocket); `login_socket` closes on a corrupt stream (the world reconnects).
+- Rust only, no behaviour change: `Map` counts live owners per 8x8 block (`set_owner`, `clear_owner`, `clear_stale_owner`) and `npc_target_search`, `npc_danger_value` and `npc_request_assistance` skip empty blocks in the same scan order. `remove_from_target` and `delete_npc` still walk every NPC (not measured).
+
 ## Next steps
 
 1. (done) The GM layers and the leftovers lists: what is not ported is either dead code ("Not ported on purpose") or listed under "Still not ported".
@@ -1327,6 +1390,13 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   it by calling `guild_ticket` (the server routine that giving a ticket runs: the ticket item itself is skipped) and the master approves
   with `COMMONTYPE_JOINGUILDAPPROVE`. Crusade (`crusade`): with `cr.mode` on, a citizen of level 10 or more sends
   `COMMONTYPE_REQUEST_SELECTCRUSADEDUTY` 1 (fighter) and raids every minute. The crusade part is NOT tested against a live crusade.
+- web page (`web-port`, `bots_web.rs`, `Client/Web/tools/bots.html`): `hg` serves read-only JSON on 127.0.0.1:`web-port` (default 8097,
+  0 = off, read at start): `/api/bots` (every bot with its level, nation, guild, class, pace, what it does, map and position, HP, gold,
+  kills; online or last seen; the maps that have bots; the last 150 chat lines: what the bots say and what players say to them) and
+  `/api/map/<name>` (a 1-bit walkability bitmap and the teleport tiles, made once). The game loop publishes it every 2 s and the HTTP
+  task only serves the published text. `serve.mjs` serves the page at `/bots` and proxies `/bots/api/*` to hg (5th argument = the port,
+  8097 by default), so the page is `http://127.0.0.1:8080/bots` once `serve.mjs` has been restarted. A bot that has not connected since `hg`
+  started shows no level until it does.
 Not yet: building, commanding or guild-teleport duties in a crusade, fight zones (they need a reservation and a ticket), guild ranks,
 other events (Heldenian, Apocalypse, Astoria).
 

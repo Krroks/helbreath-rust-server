@@ -8,7 +8,7 @@ use crate::msg::*;
 use crate::party::{self, PartyManager};
 use crate::util::*;
 use chrono::{Datelike, Local, Timelike};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -131,6 +131,18 @@ fn local_now() -> [i32; 6] {
 }
 
 /// Account validity for a new account: one month from now ("Intial 30 Days"), as a DATETIME.
+/// "until 2027-01-31: reason" (at most 100 bytes), the line the character screen shows for a banned account.
+pub fn ban_text(block_date: &[u8], reason: &[u8]) -> Vec<u8> {
+    let day = &block_date[..block_date.len().min(10)];
+    let reason = cstr(reason);
+    let mut t = b"until ".to_vec();
+    t.extend_from_slice(day);
+    t.extend_from_slice(b": ");
+    t.extend_from_slice(if reason.is_empty() { b"no reason given" } else { reason });
+    t.truncate(100);
+    t
+}
+
 pub fn valid_date(now: chrono::NaiveDateTime) -> String {
     now.checked_add_months(chrono::Months::new(1)).unwrap_or(now).format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -431,6 +443,59 @@ pub fn insert_sql(prefix: &str, values: &[String]) -> Option<String> {
     (!values.is_empty()).then(|| format!("{prefix}{};", values.join(",")))
 }
 
+/// Wrong passwords on one account: `ACCOUNT_MAX_FAILS` within `FAIL_WINDOW_MS` lock it for `ACCOUNT_LOCK_MS` (v8.00 "Account is
+/// locked, check back in 30 minutes!"). shortcut: no per-IP limit (v8.00 also has "Too many login attempts, try again in 15 minutes"):
+/// every browser reaches this Login through the bridge's address, so an IP limit would lock everybody out together.
+pub const ACCOUNT_MAX_FAILS: u32 = 5;
+pub const FAIL_WINDOW_MS: u32 = 10 * 60_000;
+pub const ACCOUNT_LOCK_MS: u32 = 30 * 60_000;
+
+/// `BanReason` of a lock saved in the database, so it survives a restart of the Login (a GM lifts it with `BlockDate='0000-00-00 00:00:00'`).
+pub const LOCK_REASON: &[u8] = b"Too many wrong passwords";
+
+/// Whole minutes (rounded up) until `block_date`, when the row is a saved lock and it has not ended; otherwise 0.
+pub fn lock_minutes_in(block_date: &[u8], reason: &[u8], now: chrono::NaiveDateTime) -> u32 {
+    if cstr(reason) != LOCK_REASON {
+        return 0;
+    }
+    let Ok(t) = chrono::NaiveDateTime::parse_from_str(&String::from_utf8_lossy(cstr(block_date)), "%Y-%m-%d %H:%M:%S") else { return 0 };
+    let secs = (t - now).num_seconds();
+    if secs > 0 { (secs as u32).div_ceil(60) } else { 0 }
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct Fails {
+    count: u32,
+    since: u32,
+    locked_until: u32, // `Server::now` time, 0 = never locked
+}
+
+impl Fails {
+    /// Whole minutes (rounded up) left of an active lock, 0 when there is none.
+    pub fn lock_minutes_left(&self, now: u32) -> u32 {
+        let d = self.locked_until.wrapping_sub(now) as i32;
+        if self.locked_until != 0 && d > 0 {
+            (d as u32).div_ceil(60_000)
+        } else {
+            0
+        }
+    }
+
+    /// Registers a wrong password; true when it is the one that locks the account.
+    pub fn fail(&mut self, now: u32) -> bool {
+        if self.count == 0 || now.wrapping_sub(self.since) > FAIL_WINDOW_MS {
+            (self.count, self.since) = (0, now);
+        }
+        self.count += 1;
+        if self.count >= ACCOUNT_MAX_FAILS {
+            self.count = 0;
+            self.locked_until = now.wrapping_add(ACCOUNT_LOCK_MS).max(1);
+            return true;
+        }
+        false
+    }
+}
+
 pub struct Server {
     cfg: Cfg,
     cfgs: Vec<Vec<u8>>,
@@ -442,6 +507,8 @@ pub struct Server {
     queue: VecDeque<(Vec<u8>, usize)>,
     party: PartyManager,
     start: Instant,
+    /// wrong-password counters and locks per account (lower case name)
+    fails: HashMap<Vec<u8>, Fails>,
     autofix: bool,
     autofix_num: u8,
     timer_stopped: bool,
@@ -472,6 +539,7 @@ impl Server {
             queue: VecDeque::new(),
             party: PartyManager::new(0),
             start: Instant::now(),
+            fails: HashMap::new(),
             autofix: false,
             autofix_num: 1,
             timer_stopped: false,
@@ -831,11 +899,41 @@ impl Server {
         self.client_login(d.s(0, 10), d.s(10, 10), Some(d.s(20, 10)), id, db).await
     }
 
+    fn send_account_locked(&mut self, id: usize, minutes: u32) {
+        let mut b = [0u8; 8];
+        W(&mut b).u32(0, MSGID_RESPONSE_LOG);
+        W(&mut b).u16(4, LOGRESMSGTYPE_ACCOUNTLOCKED);
+        W(&mut b).u16(6, minutes.min(u16::MAX as u32) as u16);
+        self.send_client(id, &b);
+    }
+
     async fn client_login(&mut self, acc: Vec<u8>, pwd: Vec<u8>, world: Option<Vec<u8>>, id: usize, db: &mut Db) -> bool {
+        // v8.00: a locked account is refused before its password is even looked at, so the lock cannot be tested with guesses
+        let key = acc.to_ascii_lowercase();
+        let now = self.now();
+        let mut left = self.fails.get(&key).map_or(0, |f| f.lock_minutes_left(now));
+        if left == 0 {
+            left = self.account_lock_left(&acc, db).await; // a lock written before a restart of this Login
+        }
+        if left > 0 {
+            self.send_account_locked(id, left);
+            return false;
+        }
         let code = match self.check_account_login(&acc, &pwd, world.as_deref(), db).await {
             ACCOUNTDONTEXISTS => LOGRESMSGTYPE_NOTEXISTINGACCOUNT,
-            PASSWORDISWRONG => LOGRESMSGTYPE_PASSWORDMISMATCH,
-            LOGINOK => return true,
+            PASSWORDISWRONG => {
+                if self.fails.entry(key).or_default().fail(now) {
+                    log_lv(&format!("(ERROR) Account [{}] locked for 30 minutes: {ACCOUNT_MAX_FAILS} wrong passwords.", s(&acc)), WARN_MSG);
+                    self.persist_account_lock(&acc, db).await;
+                    self.send_account_locked(id, ACCOUNT_LOCK_MS / 60_000);
+                    return false;
+                }
+                LOGRESMSGTYPE_PASSWORDMISMATCH
+            }
+            LOGINOK => {
+                self.fails.remove(&key);
+                return true;
+            }
             _ => return false,
         };
         let mut b = [0u8; 6];
@@ -845,14 +943,51 @@ impl Server {
         false
     }
 
+    /// Minutes left of a lock saved in the database (`BlockDate` in the future with `BanReason` = `LOCK_REASON`), 0 if none. Needs the
+    /// `BanReason` column like the bans do; without it the query fails and only the in-memory lock works.
+    async fn account_lock_left(&mut self, acc: &[u8], db: &mut Db) -> u32 {
+        let Some(r) = db.qs(&format!("SELECT `BlockDate`, `BanReason` FROM `account_database` WHERE `name` = '{}' ;", good(acc))).await else { return 0 };
+        if r.rows.is_empty() {
+            return 0;
+        }
+        lock_minutes_in(r.get(0, 0), r.get(0, 1), Local::now().naive_local())
+    }
+
+    /// Writes the lock as a ban of 30 minutes with `LOCK_REASON`, unless the account is banned already (its ban is kept).
+    async fn persist_account_lock(&mut self, acc: &[u8], db: &mut Db) {
+        if self.account_ban(acc, db).await.is_some() {
+            return;
+        }
+        let until = Local::now().naive_local() + chrono::Duration::milliseconds(ACCOUNT_LOCK_MS as i64);
+        let q = format!(
+            "UPDATE `account_database` SET `BlockDate` = '{}', `BanReason` = '{}' WHERE `name` = '{}' ;",
+            until.format("%Y-%m-%d %H:%M:%S"),
+            s(LOCK_REASON),
+            good(acc)
+        );
+        let _ = db.qs(&q).await;
+    }
+
     async fn is_account_valid(&mut self, acc: &[u8], db: &mut Db) -> bool {
         let ga = good(acc);
         let Some(r) = db.qs(&format!("SELECT `ValidDate` FROM `account_database` WHERE `name` = '{ga}' ;")).await else { return false };
+        // fixed (2026-11-23): the C++ answered true for an EXPIRED account and the flag sent to the client means "valid", so every
+        // account inside its 30 days read "Your Account is not vaild. Please Vist Our Website!" on the character screen
         if is_date_past(r.get(0, 0), local_now()) {
             log_lv(&format!("(ERROR) Account [{ga}] Is Not Valid, Intial 30 Days For Account Vaild!"), WARN_MSG);
-            return true;
+            return false;
         }
-        false
+        true
+    }
+
+    /// v8.00 ban (no C++ original): `Some(text)` while the account's `BlockDate` lies in the future; the text is "until <date>: <reason>"
+    /// from `BanReason`. A database without that column has no bans (the query fails and the account plays).
+    async fn account_ban(&mut self, acc: &[u8], db: &mut Db) -> Option<Vec<u8>> {
+        let r = db.qs(&format!("SELECT `BlockDate`, `BanReason` FROM `account_database` WHERE `name` = '{}' ;", good(acc))).await?;
+        if r.rows.is_empty() || is_date_past(r.get(0, 0), local_now()) {
+            return None;
+        }
+        Some(ban_text(r.get(0, 0), r.get(0, 1)))
     }
 
     async fn get_char_list(&mut self, acc: &[u8], out: &mut [u8], db: &mut Db) -> Option<usize> {
@@ -873,7 +1008,17 @@ impl Server {
         let valid = self.is_account_valid(acc, db).await;
         W(&mut b).u8(11, valid as u8);
         let size = self.get_char_list(acc, &mut b[23..], db).await.unwrap_or(0);
-        self.send_client(id, &b[..size + 23]);
+        let mut total = size + 23;
+        if let Some(t) = self.account_ban(acc, db).await {
+            // byte 12 (blank in the C++) says "banned"; the text follows the 8 bytes of time left that the client reads after the list
+            let at = size + 18;
+            if at + t.len() + 1 <= b.len() {
+                b[12] = 1;
+                b[at..at + t.len()].copy_from_slice(&t);
+                total = at + t.len() + 1;
+            }
+        }
+        self.send_client(id, &b[..total]);
     }
 
     async fn get_char_id(&mut self, ch: &[u8], acc: &[u8], db: &mut Db) -> u32 {
@@ -908,7 +1053,7 @@ impl Server {
         // short promoted to int and printed with %u
         let appr1 = (((d.u8(62) as i32) << 8 | (d.u8(63) as i32) << 4 | d.u8(64) as i32) as i16) as i32 as u32;
         let sql = format!(
-            "INSERT INTO `char_database` (`account_name`, `char_name`, `Strenght` , `Vitality` , `Dexterity` , `Intelligence` , `Magic` , `Agility` , `Appr1`, `Gender` , `Skin` , `HairStyle` , `HairColor` , `Underwear` , `HP` , `MP` , `SP`, `AdminLevel`) VALUES ( '{ga}', '{gc}' , '{str_}' , '{vit}' , '{dex}' , '{int}' , '{mag}' , '{agi}' ,'{appr1}' , '{}', '{}', '{}' , '{}' , '{}' , '{}','{}','{}', '0');",
+            "INSERT INTO `char_database` (`account_name`, `char_name`, `Strenght` , `Vitality` , `Dexterity` , `Intelligence` , `Magic` , `Agility` , `Appr1`, `Gender` , `Skin` , `HairStyle` , `HairColor` , `Underwear` , `HP` , `MP` , `SP`, `AdminLevel`, `LeftShutupTime`) VALUES ( '{ga}', '{gc}' , '{str_}' , '{vit}' , '{dex}' , '{int}' , '{mag}' , '{agi}' ,'{appr1}' , '{}', '{}', '{}' , '{}' , '{}' , '{}','{}','{}', '0', '2013265920');",
             d.u8(60),
             d.u8(61),
             d.u8(62),
@@ -1114,6 +1259,19 @@ impl Server {
         }
     }
 
+    /// fixed (2026-11-23): the sessions bound to a game server that is gone, or was just replaced by a freshly registered one, are
+    /// dead. The C++ kept them ("the delete is commented out"), so after an HG restart the account stayed "in use" for good: the
+    /// client's "interrupt the connection?" button asked a server that no longer knew the player, and the timer below only removes
+    /// clients that are not playing.
+    fn drop_sessions_of_server(&mut self, gsid: usize) {
+        for w in 0..MAXCLIENTS {
+            if self.clients[w].as_ref().is_some_and(|c| c.connected_server_id == gsid as i8) {
+                log(&format!("(!) Session of {} dropped: its game server [{gsid}] is gone.", s(&self.clients[w].as_ref().unwrap().account_name)));
+                self.delete_client(w);
+            }
+        }
+    }
+
     async fn process_client_request_enter_game(&mut self, d: Rd<'_>, id: usize, db: &mut Db) {
         if !self.process_client_login(d.at(22), id, db).await {
             return;
@@ -1133,6 +1291,12 @@ impl Server {
             return;
         }
         let map = cstr(r.get(0, 0)).to_vec();
+        if self.account_ban(&acc, db).await.is_some() {
+            W(&mut b).u16(4, ENTERGAMERESTYPE_REJECT);
+            W(&mut b).u8(6, REJECTTYPE_ACCOUNTBANNED);
+            self.send_client(id, &b[..24]);
+            return;
+        }
         match d.u16(0) {
             t @ (ENTERGAMEMSGTYPE_NEW | ENTERGAMEMSGTYPE_CHANGINGSERVER) => {
                 if let Some((gs_ip, gs_port, gsid)) = self.is_map_available(&map, &world) {
@@ -1194,12 +1358,13 @@ impl Server {
     /// `RequestForceDisconnect`
     fn request_force_disconnect(&mut self, w: usize, count: u16) {
         let t = self.now();
-        let Some(c) = &mut self.clients[w] else { return };
-        let gsid = c.connected_server_id;
+        let Some(gsid) = self.clients[w].as_ref().map(|c| c.connected_server_id) else { return };
         if gsid < 0 || self.gs.get(gsid as usize).map_or(true, |g| g.is_none()) {
-            c.force_disconn_request_time = t;
+            // fixed: nobody can answer a force-disconnect when the server is gone: the session simply ends
+            self.delete_client(w);
             return;
         }
+        let c = self.clients[w].as_mut().unwrap();
         let mut b = [0u8; 50];
         W(&mut b).u32(0, MSGID_REQUEST_FORCEDISCONECTACCOUNT);
         W(&mut b).u16(4, count);
@@ -1300,6 +1465,7 @@ impl Server {
         // (InternalID is read at +40 but overwritten with the slot index)
         let maps = d.at(42);
         let Some(w) = self.gs.iter().position(|g| g.is_none()) else { return };
+        self.drop_sessions_of_server(w); // a fresh server has no players, whatever the slot's previous one left behind
         let t = self.now();
         let g = self.gsock[sock].as_mut().unwrap();
         g.gsid = w as i8;
@@ -1427,6 +1593,7 @@ impl Server {
         // fixed: the C++ told the party manager the last closed *socket* index; members record the server
         self.party.game_server_down(w as i32);
         self.connected_hg_servers = self.connected_hg_servers.wrapping_sub(1);
+        self.drop_sessions_of_server(w);
     }
 
     fn confirm_char_enter_game(&mut self, d: Rd<'_>, sock: usize) {
@@ -2417,6 +2584,41 @@ mod tests {
         assert_eq!(insert_sql("P ", &["(a)".into(), "(b)".into()]).as_deref(), Some("P (a),(b);"));
         let it = Item { name: b"Rt'x".to_vec(), uid: 5, ..Default::default() };
         assert!(item_values(&it, 1).starts_with("('1','Rt\\'x',"));
+    }
+
+    #[test]
+    fn ban_text_has_date_and_reason() {
+        assert_eq!(ban_text(b"2027-01-31 12:00:00", b"cheating\0\0"), b"until 2027-01-31: cheating".to_vec());
+        assert_eq!(ban_text(b"2027-01-31 12:00:00", b""), b"until 2027-01-31: no reason given".to_vec());
+        assert_eq!(ban_text(b"2027-01-31 12:00:00", &[b'x'; 300]).len(), 100);
+    }
+
+    #[test]
+    fn wrong_passwords_lock_the_account() {
+        let mut f = Fails::default();
+        for k in 0..ACCOUNT_MAX_FAILS - 1 {
+            assert!(!f.fail(1_000 + k * 1_000), "failure {k} must not lock");
+        }
+        assert_eq!(f.lock_minutes_left(10_000), 0);
+        assert!(f.fail(10_000)); // the 5th
+        assert_eq!(f.lock_minutes_left(10_000), 30);
+        assert_eq!(f.lock_minutes_left(10_000 + 29 * 60_000 + 1), 1); // rounded up
+        assert_eq!(f.lock_minutes_left(10_000 + 30 * 60_000), 0); // over
+        // failures spread over more than the window never add up
+        let mut g = Fails::default();
+        for k in 0..10 {
+            assert!(!g.fail(k * (FAIL_WINDOW_MS + 1)));
+        }
+    }
+
+    #[test]
+    fn saved_lock_minutes() {
+        let n = chrono::NaiveDateTime::parse_from_str("2026-11-23 04:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        assert_eq!(lock_minutes_in(b"2026-11-23 04:30:00", LOCK_REASON, n), 30);
+        assert_eq!(lock_minutes_in(b"2026-11-23 04:00:01", LOCK_REASON, n), 1); // rounded up
+        assert_eq!(lock_minutes_in(b"2026-11-23 04:00:00", LOCK_REASON, n), 0); // over
+        assert_eq!(lock_minutes_in(b"2026-11-23 04:30:00", b"cheating", n), 0); // a real ban is not a lock
+        assert_eq!(lock_minutes_in(b"0000-00-00 00:00:00", LOCK_REASON, n), 0);
     }
 
     #[test]

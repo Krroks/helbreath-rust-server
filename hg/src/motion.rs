@@ -286,8 +286,8 @@ impl Game {
         if t.owner != 0 {
             if live(self, t.owner, t.owner_class) {
                 header |= 1;
-            } else if let Some(tm) = self.maps[m].tile_mut(sx + ix, sy + iy) {
-                tm.owner = 0;
+            } else {
+                self.maps[m].clear_stale_owner(sx + ix, sy + iy);
             }
         }
         if t.dead_owner != 0 {

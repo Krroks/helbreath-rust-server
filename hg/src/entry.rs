@@ -320,6 +320,7 @@ impl Game {
         self.send(h, &b);
         self.client_mut(h).unwrap().is_init_complete = true;
         self.send_enter_game_confirm(h);
+        self.event_enter(h);
         self.party_enter(h);
 
         self.send_character_contents(h);

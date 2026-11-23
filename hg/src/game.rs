@@ -7,12 +7,11 @@ use crate::droplist::DropManager;
 use crate::gamedata::GameData;
 use crate::log::{log, log_file};
 use crate::map::{Map, OWNERTYPE_PLAYER};
-use crate::net::{Ev, Tx};
+use crate::net::{Ev, EvTx, Tx};
 use crate::rng::Rng;
 use crate::util::{cstr, l1, Rd, W};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
-use tokio::sync::mpsc::UnboundedSender;
 
 pub const MAXSUBLOGSOCK: usize = 5;
 pub const MAXCLIENTS_: usize = MAXCLIENTS as usize;
@@ -46,7 +45,7 @@ pub struct Game {
     pub clients: Vec<Option<Client>>,
     conn_slot: HashMap<u64, usize>,
     pub queue: VecDeque<Msg>,
-    ev: UnboundedSender<Ev>,
+    ev: EvTx,
     ls_addr: String,
     pub ls: [Option<Tx>; MAXSUBLOGSOCK],
     ls_connecting: [bool; MAXSUBLOGSOCK],
@@ -120,6 +119,7 @@ pub struct Game {
     pub ast: crate::astoria::Astoria,
     /// Schedule.cfg's events (scheduler.rs)
     pub schedules: Vec<crate::scheduler::Schedule>,
+    pub events: crate::events::Events,
     /// notice.txt (NoticeHandler): the messages, the last send time and the last index
     pub notices: Vec<Vec<u8>>,
     pub fz: crate::fightzone::FightZones,
@@ -171,7 +171,7 @@ fn unix_time() -> u32 {
 }
 
 impl Game {
-    pub fn new(cfg: ProgramCfg, settings: Settings, maps: Vec<Map>, ev: UnboundedSender<Ev>, ls_addr: String, seed: Option<u32>) -> Game {
+    pub fn new(cfg: ProgramCfg, settings: Settings, maps: Vec<Map>, ev: EvTx, ls_addr: String, seed: Option<u32>) -> Game {
         let start = Instant::now();
         let mut g = Game {
             cfg,
@@ -240,6 +240,7 @@ impl Game {
             ap: Default::default(),
             ast: Default::default(),
             schedules: Vec::new(),
+            events: Default::default(),
             notices: Vec::new(),
             fz: Default::default(),
             notice_time: 0,
@@ -361,9 +362,9 @@ impl Game {
                 // F1+F4 in the C++ window
                 "shutdown" => self.local_shutdown(),
                 "quit" => self.quit = true,
+                l if l.starts_with("bots") => self.bots_command(&l[4..]),
                 _ => {}
             },
-                l if l.starts_with("bots") => self.bots_command(&l[4..]),
         }
     }
 
@@ -437,6 +438,7 @@ impl Game {
             self.fish_generator();
             self.send_collected_mana();
             self.scheduler();
+            self.events_tick();
             self.fish_time = now;
         }
         if now.wrapping_sub(self.whether_time) > 60_000 {
@@ -526,6 +528,8 @@ impl Game {
                 continue;
             }
             c.time_left_shutup = (c.time_left_shutup - 1).max(0);
+            self.newbie_tick(h, now);
+            let Some(c) = self.clients[h].as_mut() else { continue };
             c.time_left_rating = (c.time_left_rating - 1).max(0);
             self.player_life_timers(h);
             let Some(c) = self.clients[h].as_mut() else { continue };
@@ -706,6 +710,9 @@ impl Game {
             MSGID_REQUEST_NOTICEMENT => self.request_noticement(h, d),
             MSGID_REQUEST_FIGHTZONE_RESERVE => self.fightzone_reserve(h, d),
             MSGID_REQUEST_PANNING => self.request_panning(h, d),
+            MSGID_REQUEST_GROUNDITEMNAMES => self.request_ground_item_names(h, d),
+            MSGID_REQUEST_TYPING => self.request_typing(h, d),
+            MSGID_REQUEST_CLIENTFLAGS => self.request_client_flags(h, d),
             MSGID_REQUEST_DKITEM => self.get_dk_item(h, d),
             MSGID_STATECHANGEPOINT => self.state_change(h, d),
             MSGID_REQUEST_LGNPTS => self.request_legion_pts(h),

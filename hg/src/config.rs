@@ -33,6 +33,8 @@ pub struct Settings {
     pub rep_drop_modifier: i32,
     pub max_player_level: i32,
     pub exp_modifier: i32,
+    /// level needed to create a guild (guild-min-level; the 3.82 server asks 20, the v8.00 client text says 80)
+    pub guild_min_level: i32,
 }
 
 impl Default for Settings {
@@ -49,6 +51,7 @@ impl Default for Settings {
             rep_drop_modifier: 0,
             max_player_level: 180,
             exp_modifier: 0,
+            guild_min_level: 20,
         }
     }
 }
@@ -134,7 +137,7 @@ pub fn read_settings(path: &std::path::Path) -> Option<Settings> {
     let mut s = Settings::default();
     let mut t = StrTok::new(&data, b"= \t\n");
     let mut mode = 0;
-    let keys: [(&[u8], usize); 16] = [
+    let keys: [(&[u8], usize); 17] = [
         (b"primary-drop-rate", 1),
         (b"secondary-drop-rate", 2),
         (b"enemy-kill-adjust", 3),
@@ -151,6 +154,7 @@ pub fn read_settings(path: &std::path::Path) -> Option<Settings> {
         (b"rep-drop-modifier", 14),
         (b"max-player-level", 15),
         (b"exp-modifier", 16),
+        (b"guild-min-level", 17),
     ];
     while let Some(tok) = t.get() {
         let v = atoi(cstr(&tok));
@@ -176,6 +180,7 @@ pub fn read_settings(path: &std::path::Path) -> Option<Settings> {
             14 => s.rep_drop_modifier = v.max(0),
             15 => s.max_player_level = if v >= 801 { 800 } else if v == 0 { 180 } else { v },
             16 => s.exp_modifier = v.max(0),
+            17 => s.guild_min_level = if v <= 0 { 20 } else { v },
             _ => {}
         }
         mode = 0;
@@ -191,6 +196,14 @@ mod tests {
         let p = std::env::temp_dir().join(format!("hg-cfg-{}-{name}", std::process::id()));
         std::fs::write(&p, text).unwrap();
         p
+    }
+
+    #[test]
+    fn guild_min_level_setting() {
+        let p = tmp("gl.cfg", "[SETTINGS]\nguild-min-level = 80\n");
+        assert_eq!(read_settings(&p).unwrap().guild_min_level, 80);
+        let p = tmp("gl0.cfg", "[SETTINGS]\nmax-player-level = 180\n");
+        assert_eq!(read_settings(&p).unwrap().guild_min_level, 20); // absent: the 3.82 value
     }
 
     #[test]

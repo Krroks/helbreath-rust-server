@@ -12,6 +12,25 @@ use crate::util::{cstr, Rd, W};
 
 pub const ITEMTYPE_CONSUME: i32 = 5;
 
+/// Highest level a traveller (no nationality) reaches: 20 since v8.00; a traveller already above 20 keeps the old limit of 50.
+pub fn traveler_cap_level(level: i32) -> i32 {
+    if level <= 20 {
+        20
+    } else {
+        50
+    }
+}
+
+#[cfg(test)]
+mod traveler_tests {
+    use super::*;
+
+    #[test]
+    fn traveler_cap() {
+        assert_eq!((traveler_cap_level(1), traveler_cap_level(20), traveler_cap_level(21), traveler_cap_level(50)), (20, 20, 50, 50));
+    }
+}
+
 /// `GetExp` without parties: a bonus of 2.5% per level under 80 (+2.5%).
 pub fn exp_gain(level: i32, exp: i32) -> i32 {
     // Rust only: the C++ /100 moved to the NPC exp (create_npc), so other sources give their 3.82 amounts
@@ -243,8 +262,8 @@ impl Game {
 
     /// `bCheckLimitedUser`: travellers stop one exp point short of level 51 (NOTIFY_TRAVELERLIMITEDLEVEL).
     pub fn check_limited_user(&mut self, h: usize) -> bool {
-        let cap = self.level_exp_table[51];
         let Some(c) = self.clients[h].as_mut() else { return false };
+        let cap = self.level_exp_table[traveler_cap_level(c.level) as usize + 1];
         if c.is_neutral() && c.exp >= cap && !c.is_gm() {
             c.exp = cap - 1;
             self.notify(h, NOTIFY_TRAVELERLIMITEDLEVEL, &[], None);
@@ -264,7 +283,7 @@ impl Game {
         }
         let (l, vlevel) = (self.exp_level(v.exp), v.level);
         let reward = ek_reward_exp(&mut self.rng, l);
-        let adjust = self.settings.enemy_kill_adjust;
+        let adjust = self.settings.enemy_kill_adjust * if self.event_on(ah, crate::events::EVENT_DOUBLE_EK) { 2 } else { 1 }; // v8.00 Double EK event
         let crusade = self.cr.mode;
         let a = self.client_mut(ah).unwrap();
         a.exp = a.exp.wrapping_add(reward as u32);
@@ -435,6 +454,9 @@ impl Game {
             return;
         }
         let mut e = exp_gain(c.level, exp);
+        if self.event_on(h, crate::events::EVENT_DOUBLE_EXP) {
+            e *= 2; // v8.00 Double EXP event (events.rs)
+        }
         if c.level >= 80 && (self.maps[c.map_index].name.starts_with(b"arefarm") || self.maps[c.map_index].name.starts_with(b"elvfarm")) {
             e /= 2;
         }

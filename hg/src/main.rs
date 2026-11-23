@@ -13,6 +13,7 @@
 #[path = "../../login/src/util.rs"]
 mod util;
 mod bots;
+mod bots_web;
 mod chat;
 mod combat;
 mod delay;
@@ -46,6 +47,7 @@ mod heldenian;
 mod apocalypse;
 mod astoria;
 mod scheduler;
+mod events;
 mod gm;
 mod notice;
 mod energy;
@@ -69,7 +71,7 @@ use chrono::{Datelike, Local, Timelike};
 use log::log;
 use std::path::PathBuf;
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::channel;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Now {
@@ -107,7 +109,7 @@ fn main() {
     if let Some(d) = arg(&args, "--dir") {
         if let Err(e) = std::env::set_current_dir(&d) {
             eprintln!("cannot enter {d}: {e}");
-            std::process::exit(1);
+            log::exit(1);
         }
     }
     log("(*) INITIALIZING GAME SERVER...");
@@ -117,12 +119,12 @@ fn main() {
         Err(e) => {
             log(&e);
             log("(!!!) CRITICAL ERROR! Cannot execute server! config file contents error!");
-            std::process::exit(1);
+            log::exit(1);
         }
     };
     let Some(settings) = config::read_settings(&PathBuf::from("Settings.cfg")) else {
         log("(!!!) CRITICAL ERROR! Cannot execute server! Settings.cfg file contents error!");
-        std::process::exit(1);
+        log::exit(1);
     };
     let mut maps = Vec::new();
     let dir = PathBuf::from("MAPDATA");
@@ -132,7 +134,7 @@ fn main() {
             Ok(m) => m,
             Err(e) => {
                 log(&format!("(ERROR) Data file {n} loading fail! {e}"));
-                std::process::exit(1);
+                log::exit(1);
             }
         };
         // the C++ reads the .txt files in OnStartGameSignal; nothing uses them before that
@@ -156,7 +158,7 @@ fn main() {
     let tcp_port = cfg.game_server_port;
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async move {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = channel(net::EV_CAP);
         if !args.iter().any(|a| a == "--no-tcp") {
             tokio::spawn(net::listen(format!("{bind}:{tcp_port}"), false, tx.clone()));
         }
@@ -167,7 +169,7 @@ fn main() {
         tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
             while let Ok(Some(l)) = lines.next_line().await {
-                let _ = stdin_tx.send(net::Ev::Stdin(l));
+                let _ = stdin_tx.send(net::Ev::Stdin(l)).await;
             }
         });
         log(&format!("(*) Login (gate) server at {login}"));
@@ -191,7 +193,7 @@ fn main() {
         }
         if bcfg.count > 0 && bcfg.login.is_empty() {
             log("(!!!) bots need bot-login-address in Bots.cfg or --bots-login HOST:PORT (the Login's client port)");
-            std::process::exit(1);
+            log::exit(1);
         }
         let bots = bots::Bots::new(bcfg);
         for (i, b) in bots.list.iter().enumerate() {
@@ -200,11 +202,16 @@ fn main() {
         if !bots.list.is_empty() {
             log(&format!("(*) {} bots from {cfg_path}", bots.list.len()));
         }
-        let mut g = game::Game::new(cfg, settings, maps, tx, login, seed);
         let ev_tx = tx.clone();
+        let mut g = game::Game::new(cfg, settings, maps, tx, login, seed);
         g.bots = bots;
-        // timeSetEvent(TICKDELAY, TIME_PERIODIC) -> WM_USER_TIMERSIGNAL -> OnTimer
+        if g.bots.cfg.web_port > 0 && g.bots.cfg.count > 0 {
+            let web: bots_web::Web = Default::default();
+            tokio::spawn(bots_web::serve(g.bots.cfg.web_port, web.clone()));
+            g.bots.web = Some(web);
+        }
         (g.bots.ev, g.bots.cfg_mtime, g.bots.cfg_path) = (Some(ev_tx), std::fs::metadata(&cfg_path).and_then(|m| m.modified()).ok(), cfg_path.clone());
+        // timeSetEvent(TICKDELAY, TIME_PERIODIC) -> WM_USER_TIMERSIGNAL -> OnTimer
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(consts::TICKDELAY as u64));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !g.quit {
@@ -223,5 +230,6 @@ fn main() {
             }
         }
         log("(!) Game server stopped.");
+        log::flush();
     });
 }

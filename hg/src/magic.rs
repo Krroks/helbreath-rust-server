@@ -272,7 +272,8 @@ impl Game {
         let (dx, dy) = (dx as i16, dy as i16);
         let c = self.client_mut(h).unwrap();
         c.cs.has_precasted = false;
-        if (dx - c.x).abs() > 11 || (dy - c.y).abs() > 11 {
+        // fix: 16:9 client, targets show up to 14 columns away (the C++ allowed 11 in both axes)
+        if (dx - c.x).abs() > VIEW_NEAR_X || (dy - c.y).abs() > 11 {
             let msg = format!("Player ({}) casted further than maximum range ({},{})->({},{})", String::from_utf8_lossy(crate::util::cstr(&c.char_name)), c.x, c.y, dx, dy);
             crate::log::log(&msg);
             crate::log::log_file(&msg);
@@ -559,7 +560,7 @@ impl Game {
             MAGICTYPE_TELEPORT => {
                 if sp.val[0] == 1 && target == Some((h, OWNERTYPE_PLAYER)) {
                     let c = self.client(h).unwrap();
-                    if now.wrapping_sub(c.cs.last_damage_time) > 10000 || c.is_gm() {
+                    if !self.damaged_recently(h) {
                         // a recall point chosen with MSGID_REQUEST_SETRECALLPNT (in the home town) is a scripted teleport
                         let point = (c.next_recall_point != 0 && crate::util::cstr(&c.map_name) == SIDE_MAP[c.side.clamp(0, 3) as usize])
                             .then(|| self.maps[c.map_index].initial_points.get(c.next_recall_point as usize).copied().flatten())

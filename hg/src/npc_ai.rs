@@ -38,7 +38,14 @@ impl Game {
         let search_type = (ty == NPC_CP as i16) as i32;
         let (mut best, mut dist) = (None, 100);
         for ix in sx - r..=sx + r {
-            for iy in sy - r..=sy + r {
+            let mut y = sy - r;
+            while y <= sy + r {
+                let iy = y;
+                if self.maps[m].block_empty(ix, iy) {
+                    y = crate::map::next_block(iy); // nothing alive in this 8x8 block
+                    continue;
+                }
+                y += 1;
                 let (o, ot) = self.maps[m].get_owner(ix, iy);
                 if o <= 0 || (ot == OWNERTYPE_NPC && o as usize == i) {
                     continue;
@@ -101,7 +108,14 @@ impl Game {
         let n = self.npcs[i].as_ref().unwrap();
         let mut v = 0;
         for ix in dx - 2..=dx + 2 {
-            for iy in dy - 2..=dy + 2 {
+            let mut y = dy - 2;
+            while y <= dy + 2 {
+                let iy = y;
+                if self.maps[n.map_index].block_empty(ix, iy) {
+                    y = crate::map::next_block(iy);
+                    continue;
+                }
+                y += 1;
                 let (o, ot) = self.maps[n.map_index].get_owner(ix, iy);
                 if o <= 0 {
                     continue;
@@ -372,7 +386,14 @@ impl Game {
         let n = self.npcs[i].as_ref().unwrap();
         let (m, sx, sy, side, t, tt) = (n.map_index, n.x, n.y, n.side, n.target, n.target_type);
         for ix in sx - 8..=sx + 8 {
-            for iy in sy - 8..=sy + 8 {
+            let mut y = sy - 8;
+            while y <= sy + 8 {
+                let iy = y;
+                if self.maps[m].block_empty(ix, iy) {
+                    y = crate::map::next_block(iy);
+                    continue;
+                }
+                y += 1;
                 let (o, ot) = self.maps[m].get_owner(ix, iy);
                 if o <= 0 || ot != OWNERTYPE_NPC || o as usize == i {
                     continue;

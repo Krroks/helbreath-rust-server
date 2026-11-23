@@ -115,8 +115,8 @@ pub fn decode(g: &mut Game, h: usize, d: &[u8]) -> bool {
     c.down_skill_index = r.u8(209) as i8 as i32;
     c.hunger_status = r.u8(210) as i32;
     c.super_attack_left = r.u16(211) as i32;
-    c.time_left_shutup = r.u32(213) as i32;
-    c.time_left_rating = r.u32(217) as i32;
+    (c.time_left_shutup, c.newbie_min) = crate::events::split_shutup(r.u32(213));
+    (c.time_left_rating, c.ui_flags) = crate::events::split_rating(r.u32(217));
     c.time_left_force_recall = r.u32(221) as i32;
     c.time_left_firm_stamina = r.u32(225) as i32;
     c.dead_penalty_time = r.u32(229) as i32;
@@ -360,8 +360,8 @@ pub fn compose(g: &mut Game, h: usize) -> Vec<u8> {
     w.u8(210, c.hunger_status as u8);
     w.u16(211, c.super_attack_left as u16);
     for (o, v) in [
-        (213, c.time_left_shutup),
-        (217, c.time_left_rating),
+        (213, crate::events::join_shutup(c.time_left_shutup, c.newbie_min) as i32),
+        (217, crate::events::join_rating(c.time_left_rating, c.ui_flags) as i32),
         (221, c.time_left_force_recall),
         (225, c.time_left_firm_stamina),
         (229, c.dead_penalty_time),

@@ -80,6 +80,8 @@ pub const LOGRESMSGTYPE_CONFIRM: u16 = 0x0F14;
 pub const LOGRESMSGTYPE_REJECT: u16 = 0x0F15;
 pub const LOGRESMSGTYPE_PASSWORDMISMATCH: u16 = 0x0F16;
 pub const LOGRESMSGTYPE_NOTEXISTINGACCOUNT: u16 = 0x0F17;
+/// v8.00 "Account is locked, check back in N minutes!": too many wrong passwords (the original header already names it; payload: u16 minutes)
+pub const LOGRESMSGTYPE_ACCOUNTLOCKED: u16 = 0x0F31;
 pub const LOGRESMSGTYPE_NEWACCOUNTCREATED: u16 = 0x0F18;
 pub const LOGRESMSGTYPE_ALREADYEXISTINGACCOUNT: u16 = 0x0F1A;
 pub const LOGRESMSGTYPE_NOTEXISTINGCHARACTER: u16 = 0x0F1B;
@@ -99,6 +101,8 @@ pub const ENTERGAMERESTYPE_CONFIRM: u16 = 0x0F22 + M2 as u16;
 pub const ENTERGAMERESTYPE_FORCEDISCONN: u16 = 0x0F23 + M2 as u16;
 pub const REJECTTYPE_GAMESERVEROFFLINE: u8 = 0x05;
 pub const REJECTTYPE_MAXSERVERUSERLIMITREACHED: u8 = 0x06;
+/// no original: the account is banned (BlockDate in the future); the client shows the reason it got with the character list
+pub const REJECTTYPE_ACCOUNTBANNED: u8 = 0x08;
 
 pub const GSM_REQUEST_FINDCHARACTER: u8 = 0x01 + M2 as u8;
 pub const GSM_RESPONSE_FINDCHARACTER: u8 = 0x02 + M2 as u8;

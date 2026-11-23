@@ -368,6 +368,15 @@ impl Game {
                 w.bytes(26, &pad(Some(&c.location), 10));
                 36
             }
+            NOTIFY_CLIENTFLAGS => {
+                w.u32(6, a(0) as u32);
+                10
+            }
+            NOTIFY_SERVEREVENTS => {
+                w.u32(6, a(0) as u32);
+                w.u32(10, a(1) as u32);
+                14
+            }
             NOTIFY_TELEPORT_REJECTED => {
                 w.u16(6, a(0) as u16);
                 w.u16(8, a(1) as u16);

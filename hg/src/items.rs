@@ -10,9 +10,54 @@ use crate::life::ITEMTYPE_CONSUME;
 const ITEM_RELIC: i32 = 1005;
 use crate::consts::*;
 use crate::game::Game;
-use crate::util::W;
+use crate::util::{Rd, W};
+
+/// Most tiles one MSGID_REQUEST_GROUNDITEMNAMES may ask for.
+pub const GROUNDNAMES_MAX: usize = 24;
+
+/// MSGID_RESPONSE_GROUNDITEMNAMES: `[id u32][type u16][count u8]` then per tile `[x i16][y i16][name 20][attribute u32][count u32]`
+/// (a zeroed name = nothing lies there any more). The client turns name + attribute into the display name.
+pub fn encode_ground_names(rows: &[(i16, i16, Option<&Item>)]) -> Vec<u8> {
+    let mut b = vec![0u8; 7 + rows.len() * 32];
+    let mut w = W(&mut b);
+    w.u32(0, MSGID_RESPONSE_GROUNDITEMNAMES);
+    w.u8(6, rows.len() as u8);
+    for (k, (x, y, it)) in rows.iter().enumerate() {
+        let o = 7 + k * 32;
+        w.u16(o, *x as u16);
+        w.u16(o + 2, *y as u16);
+        if let Some(it) = it {
+            w.bytes(o + 4, &it.cfg.name[..it.cfg.name.len().min(19)]);
+            w.u32(o + 24, it.attribute);
+            w.u32(o + 28, it.count);
+        }
+    }
+    b
+}
 
 impl Game {
+    /// v8.00 "ground item names" (no C++ original): the client asks for the top item of the tiles it draws one on;
+    /// only tiles within the view are answered, at most `GROUNDNAMES_MAX` per request.
+    pub fn request_ground_item_names(&mut self, h: usize, d: &[u8]) {
+        let Some(c) = self.client(h) else { return };
+        if !c.is_init_complete {
+            return;
+        }
+        let (m, cx, cy) = (c.map_index, c.x, c.y);
+        let r = Rd::new(d);
+        let n = (r.u8(6) as usize).min(GROUNDNAMES_MAX);
+        let tiles: Vec<(i16, i16)> = (0..n)
+            .map(|k| (r.u16(7 + k * 4) as i16, r.u16(9 + k * 4) as i16))
+            .filter(|&(x, y)| (x - cx).abs() <= VIEW_NEAR_X && (y - cy).abs() <= VIEW_NEAR_Y)
+            .collect();
+        if tiles.is_empty() {
+            return;
+        }
+        let rows: Vec<(i16, i16, Option<&Item>)> = tiles.iter().map(|&(x, y)| (x, y, self.ground.get(&(m, x, y)).and_then(|v| v.first()))).collect();
+        let b = encode_ground_names(&rows);
+        self.send(h, &b);
+    }
+
     /// `bSetItem` + the COMMONTYPE_ITEMDROP event. The tile's top item is what the client draws.
     pub fn drop_ground_item(&mut self, m: usize, x: i16, y: i16, it: Item) -> bool {
         if !self.maps[m].valid(x, y) {
@@ -271,5 +316,29 @@ impl Game {
                 self.send_event_type_b(MSGID_EVENT_COMMON, COMMONTYPE_SETITEM as u16, m, x, y, [t.0, t.1, t.2 as i16, 0]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gamedata::ItemCfg;
+
+    #[test]
+    fn ground_names_layout() {
+        let cfg = ItemCfg { name: b"Dagger+1".to_vec(), ..Default::default() };
+        let mut it = Item::new(&cfg);
+        it.attribute = 0x1234_5678;
+        it.count = 3;
+        let b = encode_ground_names(&[(10, 20, Some(&it)), (11, 21, None)]);
+        assert_eq!(b.len(), 7 + 64);
+        assert_eq!(u32::from_le_bytes(b[0..4].try_into().unwrap()), MSGID_RESPONSE_GROUNDITEMNAMES);
+        assert_eq!(b[6], 2);
+        assert_eq!((u16::from_le_bytes([b[7], b[8]]), u16::from_le_bytes([b[9], b[10]])), (10, 20));
+        assert_eq!(&b[11..19], b"Dagger+1");
+        assert_eq!(b[19], 0);
+        assert_eq!(u32::from_le_bytes(b[31..35].try_into().unwrap()), 0x1234_5678);
+        assert_eq!(u32::from_le_bytes(b[35..39].try_into().unwrap()), 3);
+        assert_eq!(&b[39 + 4..39 + 24], &[0u8; 20]); // the empty tile has no name
     }
 }

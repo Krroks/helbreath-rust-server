@@ -4,7 +4,7 @@
 use crate::consts::*;
 use crate::game::Game;
 
-use crate::util::{cstr, StrTok};
+use crate::util::{cstr, StrTok, W};
 
 const CHAT_NORMAL: u8 = 0;
 pub const CHAT_GUILD: u8 = 1;
@@ -14,7 +14,34 @@ const CHAT_NATIONSHOUT: u8 = 3;
 const CHAT_PARTY: u8 = 4;
 const CHAT_WHISPER: u8 = 20;
 
+/// MSGID_EVENT_TYPING: `[id u32][type u16][name 10][state u8]` (state 1 = typing, 0 = stopped).
+pub fn encode_typing(name: &[u8], typing: bool) -> Vec<u8> {
+    let mut b = vec![0u8; 17];
+    let mut w = W(&mut b);
+    w.u32(0, MSGID_EVENT_TYPING);
+    w.bytes(6, &name[..name.len().min(10)]);
+    w.u8(16, typing as u8);
+    b
+}
+
 impl Game {
+    /// v8.00 (no C++ original): a player starts or stops typing a chat line; the players within sight get a bubble over its head.
+    /// A client repeats state 1 every few seconds while it types, so one that vanishes is forgotten by the others on their own.
+    pub fn request_typing(&mut self, h: usize, d: &[u8]) {
+        let now = self.now();
+        let Some(c) = self.client_mut(h) else { return };
+        if !c.is_init_complete || now.wrapping_sub(c.typing_time) < 1000 {
+            return;
+        }
+        c.typing_time = now;
+        let (m, x, y, name) = (c.map_index, c.x, c.y, crate::util::cstr(&c.char_name).to_vec());
+        let b = encode_typing(&name, crate::util::Rd::new(d).u8(6) != 0);
+        for o in self.handles() {
+            if o != h && self.client(o).is_some_and(|c| c.is_init_complete && c.map_index == m && (c.x - x).abs() <= VIEW_NEAR_X && (c.y - y).abs() <= VIEW_NEAR_Y) {
+                self.send(o, &b);
+            }
+        }
+    }
     pub fn chat_msg(&mut self, h: usize, d: &[u8]) {
         let Some(c) = self.client(h) else { return };
         if !c.is_init_complete || d.len() > 83 + 30 || c.time_left_shutup > 0 {
@@ -126,7 +153,7 @@ impl Game {
                 // in a crusade the normal and shout lines do not reach the enemy side
                 let enemy = crusade && !neutral && !o.is_neutral() && o.side != side;
                 let to = match mode {
-                    CHAT_NORMAL => !enemy && o.map_index == m && o.x > x - 10 && o.x < x + 10 && o.y > y - 7 && o.y < y + 7,
+                    CHAT_NORMAL => !enemy && o.map_index == m && (o.x - x).abs() <= VIEW_NEAR_X && (o.y - y).abs() <= VIEW_NEAR_Y,
                     CHAT_GUILD => Game::pad20(&o.guild_name) == guild && !o.guild_name.starts_with(b"NONE"),
                     CHAT_SHOUT => !enemy,
                     CHAT_GM => true,
@@ -223,5 +250,20 @@ impl Game {
             return;
         }
         self.stock_find_character(h, &name);
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    #[test]
+    fn typing_event_layout() {
+        let b = encode_typing(b"Leslietat", true);
+        assert_eq!(b.len(), 17);
+        assert_eq!(u32::from_le_bytes(b[0..4].try_into().unwrap()), MSGID_EVENT_TYPING);
+        assert_eq!(&b[6..15], b"Leslietat");
+        assert_eq!((b[15], b[16]), (0, 1));
+        assert_eq!(encode_typing(b"X", false)[16], 0);
     }
 }
