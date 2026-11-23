@@ -597,6 +597,8 @@ pub struct Bot {
     session_until: u32,
     deaths: u32,
     last_chat: u32,
+    /// the last time it showed the typing bubble before a chat line
+    last_typing: u32,
     last_guild: u32,
     /// quest: 0 going to a town, 1 asking for it, 2 hunting, 3 back to hand it in; when it started, the last ask, the monster type it must kill (0 = any)
     qphase: u8,
@@ -1227,6 +1229,7 @@ impl Game {
         let (from, map) = self.clients[h].as_ref().map_or((String::new(), String::new()), |c| (String::from_utf8_lossy(crate::util::cstr(&c.char_name)).to_string(), String::from_utf8_lossy(&self.maps[c.map_index].name).to_string()));
         self.bots_note_chat(&from, to.unwrap_or(""), text, true, &map);
         self.chat_msg(h, &f);
+        self.broadcast_typing(h, false);
         if let Some(c) = self.clients[h].as_mut() {
             (c.whisper_player_index, c.whisper_player_name) = (-1, Vec::new());
         }
@@ -1252,6 +1255,16 @@ impl Game {
                     }
                 }
             } else {
+                // v8.00 typing bubble: the line is "typed" for the last moments before it is said (a long line takes longer)
+                let (n, due) = (self.bots.chat_q[i].0, self.bots.chat_q[i].3);
+                let type_ms = (800 + 60 * self.bots.chat_q[i].2.len() as i32).min(4000);
+                if due.wrapping_sub(now) as i32 <= type_ms && now.wrapping_sub(self.bots.list[n].last_typing) > 3500 {
+                    self.bots.list[n].last_typing = now;
+                    let ch = self.bots.list[n].ch.clone();
+                    if let Some(h) = self.bot_handle(&ch) {
+                        self.broadcast_typing(h, true);
+                    }
+                }
                 i += 1;
             }
         }

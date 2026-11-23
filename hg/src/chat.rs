@@ -34,8 +34,14 @@ impl Game {
             return;
         }
         c.typing_time = now;
+        self.broadcast_typing(h, crate::util::Rd::new(d).u8(6) != 0);
+    }
+
+    /// MSGID_EVENT_TYPING of player `h` to the players within sight (also used by the bots, which "type" before they chat).
+    pub fn broadcast_typing(&mut self, h: usize, typing: bool) {
+        let Some(c) = self.client(h) else { return };
         let (m, x, y, name) = (c.map_index, c.x, c.y, crate::util::cstr(&c.char_name).to_vec());
-        let b = encode_typing(&name, crate::util::Rd::new(d).u8(6) != 0);
+        let b = encode_typing(&name, typing);
         for o in self.handles() {
             if o != h && self.client(o).is_some_and(|c| c.is_init_complete && c.map_index == m && (c.x - x).abs() <= VIEW_NEAR_X && (c.y - y).abs() <= VIEW_NEAR_Y) {
                 self.send(o, &b);
