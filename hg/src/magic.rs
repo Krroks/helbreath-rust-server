@@ -26,6 +26,8 @@ pub const MAGICTYPE_CREATE: i32 = 10;
 pub const MAGICTYPE_CREATE_DYNAMIC: i32 = 14;
 pub const MAGICTYPE_POSSESSION: i32 = 15;
 pub const MAGICTYPE_DAMAGE_LINEAR: i32 = 19;
+/// v8.00 Earth-Shock-Wave: the linear spell (spot, area, line) that also drains the stamina by the damage rolled
+pub const MAGICTYPE_DAMAGE_LINEAR_SPDOWN: i32 = 30;
 pub const MAGICTYPE_POLYMORPH: i32 = 20;
 pub const MAGICTYPE_DAMAGE_AREA_NOSPOT: i32 = 21;
 pub const MAGICTYPE_TREMOR: i32 = 22;
@@ -452,8 +454,15 @@ impl Game {
                 let a = Some((spot(sp.main(wb), true), Post::SpDown(sp.linear(0))));
                 self.magic_hit_tile(pa, m, dx, dy, r, attr, a, a);
             }
-            MAGICTYPE_DAMAGE_LINEAR | MAGICTYPE_ICE_LINEAR => {
-                let ice = if sp.ty == MAGICTYPE_ICE_LINEAR { Post::Ice(MAGICTYPE_ICE_LINEAR, sp.val[6].max(0) as u32, false) } else { Post::None };
+            MAGICTYPE_DAMAGE_LINEAR | MAGICTYPE_ICE_LINEAR | MAGICTYPE_DAMAGE_LINEAR_SPDOWN => {
+                let drain = sp.ty == MAGICTYPE_DAMAGE_LINEAR_SPDOWN;
+                let ice = if sp.ty == MAGICTYPE_ICE_LINEAR {
+                    Post::Ice(MAGICTYPE_ICE_LINEAR, sp.val[6].max(0) as u32, false)
+                } else if drain {
+                    Post::SpDown(sp.linear(0)) // line and area: the stamina goes down by the same dice as the damage
+                } else {
+                    Post::None
+                };
                 const CROSS: [(i16, i16); 5] = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)];
                 for i in 2..10 {
                     let (tx, ty) = get_point2(s.0, s.1, dx, dy, i);
@@ -469,7 +478,7 @@ impl Game {
                     let a = Some((mv(sp.linear(wb), false, d), ice));
                     self.magic_hit_tile(pa, m, x, y, r, attr, a, a);
                 }
-                let a = Some((spot(sp.main(wb), true), ice));
+                let a = Some((spot(sp.main(wb), true), if drain { Post::SpDown(sp.main(0)) } else { ice }));
                 self.magic_hit_tile(pa, m, dx, dy, r, attr, a, a);
             }
             MAGICTYPE_CANCELLATION => {

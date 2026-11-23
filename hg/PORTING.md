@@ -196,10 +196,53 @@ client has and the 3.82-based one lacked. The original client never sends them, 
   schema change, like the starter bonus in `LeftShutupTime`; `events::split_rating` / `join_rating`), written with the next save;
   bits 0-1 are stored inverted, so old rows (0) mean typing ON, low health ON, item names OFF. Test `rating_and_ui_flags_share_a_u32`.
 
+- **v8.00 spells on** (2026-11-23, `Login/Config/Magic.cfg`, values of the Nemesis server where the sources disagree): Cancellation (76, type
+  28, manual `CancelManual`), Illusion-Movement (77, type 16 value 4, mana 130, 27000 gold), Mass-Magic-Missile (82, a plain area spell
+  of type 3: 7d7+30 on the target and the 3x3 around it, mana 160, INT 185, 45000 gold; Olympia's "can move affected units" is not
+  done), Inhibition-Casting (83, type 29, mana 180, manual `I.M.CManual`), Mass-Illusion-Movement (95, 60 s, 27000 gold) and
+  Earth-Shock-Wave (96, new type 30 `MAGICTYPE_DAMAGE_LINEAR_SPDOWN` in magic.rs: the linear spell of Bloody-Shock-Wave whose every
+  hit also takes the same dice off the stamina; manual `E.S.W.Manual`). The client rows are in `CONTENTS/magiccfg.txt`. Still off, no
+  source says how they work: Ice-Whirlwind (75, a monster spell in Olympia), Air-Blast (84), Absolute-Protect-Arrow (92). Needs the
+  Login restarted (it sends Magic.cfg to the game servers). Untested against a live client; test `real_login_configs` checks the rows.
+
 - **Dyes** (v8.00): a dye (`item_use.rs`) now also colours weapons and armour (equip_pos head, body, arms, pants, leggings, hands, back),
   as long as the item is not worn (the look is rebuilt only when equipping); the client tooltip says "This item can be dyed.".
 
 - **Mobs**: Scarecrow (type 92) and Princess (type 102) sprites loaded from the v8.00 paks (client only, no server change).
+
+## TODO: v8.00 (Apocalypse) features not done (2026-11-23)
+
+Sources used: Helbreath Olympia wiki (helbreath.net/wiki: Spells, Talents, Rare_Items, Armor, Weapons, Dark_Knight_Mage_and_Hero_Items),
+Helbreath Nemesis portal (helbreathnemesis.com/portal: magicspells, rareitems; its values win where the sources disagree) and the
+public Equilibrium Project server (github.com/play-helbreath/helbreath-equilibrium: `server/Core/*.cfg`, `docs/recovered/EP Magic.txt`,
+its `Sources` folder not read yet). None of them is Apocalypse v8 itself and no public repository of the v8 server files was found.
+
+Missing information (nothing to implement from until someone supplies it):
+
+- **Ice-Whirlwind** (Magic.cfg 75, type 23, commented): freeze chance and duration, the damage on an already frozen target, which
+  monsters cast it and when (Olympia: INT 200, mana 120, 2 hits of 33 in 3x3, monster spell).
+- **Air-Blast** (84, commented): nothing on any source.
+- **Absolute-Protect-Arrow** (92, commented): nothing; only the plain Protection From Arrow (60 s) is documented.
+- **Sets Majestic, Angelic, Juggernaut, Dragon Staff**: piece names, stats, effects. (Olympia's "Majestic" is a currency for upgrading Dark
+  Knight/Mage weapons, not a set; "Dragon Wand of Legends", 28 % mana save, may be the Dragon Staff.)
+- **Item effects "paralyse the attacker" and "storm strike"**: chance, duration, cooldown.
+- **Reflect indicator**: what reflects, how much, what is drawn (only known: the Dragon monster returns 5 % of the damage).
+- **EnhancedDemonSlayer**: stats, effect, recipe. **BerserkWand(MS.10) recipe**: ingredients (the wand exists, 861/862, and drops).
+- **Scavenger event** (tokens, prizes by probability): everything.
+- **Rally point and help request** (guild / party): everything, message format included.
+
+Not searched yet (information may exist):
+
+- The 4 new maps (`btfield2`, `easternshores`, `godh2`, `hrampart2`): monsters, teleports, entrances.
+- Toggle to attack or not neutral / allied targets.
+- Accounts: password recovery with a security question, time left of the account, maintenance notice.
+- Read the Equilibrium `Sources` folder (HG source) for how Explosion (type 52, knocks the target away) and type 30 work.
+
+Optional, a choice already made: Mass-Magic-Missile has no push ("can move affected units" is Olympia only, no distance given);
+Cancellation has no 60 s cool-down nor wand charges (Olympia only); Illusion-Movement lasts 30 s (Nemesis says "0 seconds", Olympia 20 s).
+
+Known, not blocked by information: "repair all" button (the repair is in shop.rs), the Character Roster screen, the "intelligence + cost"
+format of the magic cfg, saving the web client toggles in localStorage (the registry is stubbed, so they reset on reload).
 
 ## Gameplay-visible fixes (the owner decides)
 

@@ -535,6 +535,11 @@ mod tests {
         assert_eq!((atoi(&sc[1]), atoi(&sc[2]), atoi(&sc[3]), atoi(&sc[20]), atoi(&sc[21])), (20, 355, 1, 0, 30));
         let rw = crate::crafting::find_recipe(g.crafting.iter(), &[358, 1, 351, 2, -1, 0, -1, 0, -1, 0, -1, 0]).expect("RubyWare");
         assert_eq!((rw.name.as_slice(), rw.limit, rw.difficulty), (&b"RubyWare"[..], 0, 70));
+        // v8.00 spells on (Nemesis values): spell number -> (type, mana, INT)
+        for (n, ty, mana, int) in [(76, 28, 120, 135), (77, 16, 130, 160), (82, 3, 160, 185), (83, 29, 180, 180), (95, 16, 200, 200), (96, 30, 180, 200)] {
+            let sp = g.magic.get(n).and_then(|r| r.as_deref()).and_then(crate::magic::Spell::parse).unwrap_or_else(|| panic!("spell {n} is off"));
+            assert_eq!((sp.ty, sp.mana, atoi(&g.magic[n].as_ref().unwrap()[16])), (ty, mana, int), "spell {n}");
+        }
         assert!(g.all_ok(), "item {} npc {} magic {} skill {} potion {} quest {} build {}", g.item_ok, g.npc_ok, g.magic_ok, g.skill_ok, g.potion_ok, g.quest_ok, g.build_item_ok);
     }
 }
