@@ -590,6 +590,8 @@ pub struct Bot {
     raid_map: usize,
     raid_target: usize,
     raid_kills: u32,
+    /// player handles it gave up on during this raid, until a time
+    raid_ignore: Vec<(usize, u32)>,
     last_level: i32,
     /// its number (0-based), whether it was connected at the last look, when its session ends and what it is called
     n: usize,
@@ -2041,6 +2043,7 @@ impl Game {
         let Some(d) = d else { return false };
         log(&format!("(bot) {}: raid on {} ({} players of the rival nation there)", b.ch, String::from_utf8_lossy(&self.maps[d].name), self.handles().iter().filter(|&&j| self.clients[j].as_ref().is_some_and(|o| o.side == enemy && o.map_index == d)).count()));
         (b.mode, b.last_raid, b.raid_start, b.raid_map, b.raid_target, b.raid_kills, b.target, b.no_route_logged) = (Mode::Raid, now, now, d, 0, 0, 0, false);
+        (b.attacks, b.raid_ignore) = (0, Vec::new());
         b.path.clear();
         true
     }
@@ -2081,26 +2084,29 @@ impl Game {
             log(&format!("(bot) {}: rival player down ({} kills in this raid)", b.ch, b.raid_kills));
             b.raid_target = 0;
         }
+        b.raid_ignore.retain(|&(_, t)| now.wrapping_sub(t) as i32 <= 0);
         if b.raid_target == 0 {
-            let best = self.handles().into_iter().filter_map(|j| alive(self, j).map(|t| (cheb(pos, t), j))).filter(|&(d, _)| d <= b.sight * 2).min();
-            b.raid_target = best.map_or(0, |(_, j)| j);
+            let ignored = |j: usize| b.raid_ignore.iter().any(|&(i, _)| i == j);
+            let best = self.handles().into_iter().filter(|&j| !ignored(j)).filter_map(|j| alive(self, j).map(|t| (cheb(pos, t), j))).filter(|&(d, _)| d <= b.sight * 2).min();
+            (b.raid_target, b.attacks) = (best.map_or(0, |(_, j)| j), 0);
         }
         if let Some((tx, ty)) = alive(self, b.raid_target) {
             if self.bot_role(h, b).shoot && cheb(pos, (tx, ty)) <= cfg.bow_range {
-                let thp = self.npcs[b.target].as_ref().map_or(0, |n| n.hp);
+                // the target is a player (a client handle), not an npc index: its HP is read from the client
+                let thp = self.clients[b.raid_target].as_ref().map_or(0, |o| o.hp);
                 if b.attacks == 0 {
                     b.target_hp0 = thp;
                 }
                 if b.attacks >= cfg.giveup_hits * 2 && thp * 100 > b.target_hp0 * cfg.giveup_pct {
-                    log(&format!("(bot) {}: giving up on npc {} ({thp}/{} HP after {} arrows)", b.ch, b.target, b.target_hp0, b.attacks));
-                    b.ignore.push((b.target, now.wrapping_add(120_000)));
-                    b.target = 0;
+                    log(&format!("(bot) {}: giving up on player {} ({thp}/{} HP after {} arrows)", b.ch, b.raid_target, b.target_hp0, b.attacks));
+                    b.raid_ignore.push((b.raid_target, now.wrapping_add(120_000)));
+                    b.raid_target = 0;
                     return;
                 }
                 if now.wrapping_sub(b.last_attack) >= b.attack_ms {
                     b.last_attack = now;
                     b.attacks += 1;
-                    let f = motion(OBJECTATTACK, pos, dir_to(pos, (tx, ty)).max(1), now, Some((tx, ty, 2, 10000 + b.target as u16)));
+                    let f = motion(OBJECTATTACK, pos, dir_to(pos, (tx, ty)).max(1), now, Some((tx, ty, 2, b.raid_target as u16)));
                     self.bot_send(h, f);
                 }
                 return; // standing off: the arrow reaches it
@@ -3212,5 +3218,218 @@ mod tests {
         c.items[0] = Some(it);
         assert_eq!(repair_slot(&c, &[0], &[], 30, 10_000), Some(0));
         assert_eq!(repair_slot(&c, &[], &[], 30, 10_000), None, "a looted broken piece is left alone");
+    }
+
+    // ---------------------------------------------------------------- tests on a real Game (a small world)
+
+    use crate::config::Settings;
+    use crate::map::{Map, TeleportLoc};
+    use crate::npc::Npc;
+
+    fn world(maps: Vec<Map>) -> (Game, tokio::sync::mpsc::Receiver<Ev>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        (Game::new(Default::default(), Settings::default(), maps, tx, String::new(), Some(1)), rx)
+    }
+
+    /// A level 20 player with full HP on map `map`.
+    fn add(g: &mut Game, h: usize, name: &str, side: i32, map: usize, pos: (i16, i16)) {
+        let (tx, _rx) = unbounded_channel();
+        let mut c = Client::new(h, h as u64, tx, b"1.2.3.4".to_vec(), 0);
+        c.char_name = name.as_bytes().to_vec();
+        (c.is_init_complete, c.side, c.map_index, c.x, c.y, c.level) = (true, side, map, pos.0, pos.1, 20);
+        (c.str_, c.vit, c.dex, c.int_, c.mag) = (20, 20, 20, 10, 10);
+        c.hp = c.get_max_hp();
+        g.clients[h] = Some(c);
+    }
+
+    fn open_map(name: &[u8]) -> Map {
+        Map::new(name, 100, 100)
+    }
+
+    /// The frames the bots queued, as (msgid, command, the target field of a motion).
+    fn queued(g: &Game) -> Vec<(u32, u16, u16)> {
+        g.queue.iter().map(|m| (Rd::new(&m.body).u32(0), Rd::new(&m.body).u16(4), if m.body.len() >= 23 { Rd::new(&m.body).u16(21) } else { 0 })).collect()
+    }
+
+    fn item(name: &[u8], count: u32) -> Item {
+        let mut it = Item::new(&Default::default());
+        (it.cfg.name, it.count) = (name.to_vec(), count);
+        it
+    }
+
+    fn raider(g: &mut Game, cfg: &BotCfg, n: usize) -> Bot {
+        let mut b = Bot::made(cfg, n);
+        let now = 100_000;
+        (b.mode, b.raid_map, b.raid_start, b.last_attack, b.last_step) = (Mode::Raid, 0, now, 0, 0);
+        let _ = g;
+        b
+    }
+
+    #[test]
+    fn an_archer_on_a_raid_shoots_at_the_rival_player_not_at_npc_zero() {
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        add(&mut g, 1, "Bot05", ARESDEN, 0, (40, 40));
+        add(&mut g, 2, "Rival", ELVINE, 0, (43, 40));
+        add(&mut g, 3, "Friend", ARESDEN, 0, (41, 40)); // nearer, but of its own side
+        {
+            let c = g.clients[1].as_mut().unwrap();
+            let mut bow = item(b"LongBow", 1);
+            (bow.cfg.item_type, bow.cfg.equip_pos, bow.cfg.item_effect_type, bow.max_life_span, bow.cur_life_span) = (1, EQUIPPOS_TWOHAND, ITEMEFFECTTYPE_ATTACK_ARROW, 100, 100);
+            let mut arrows = item(b"Arrow", 20);
+            arrows.cfg.item_type = crate::combat::ITEMTYPE_ARROW;
+            (c.items[0], c.items[1], c.equip_status[EQUIPPOS_TWOHAND as usize], c.appr[1]) = (Some(bow), Some(arrows), 0, 0xF000u16 as i16);
+        }
+        let cfg = BotCfg { count: 6, ..Default::default() };
+        let mut b = raider(&mut g, &cfg, 5);
+        assert_eq!(b.arch, 4, "bot 5 is the archer");
+        assert!(g.bot_role(1, &b).shoot, "a bow on and arrows in the bag");
+        let (hp, max) = (g.clients[1].as_ref().unwrap().hp, g.clients[1].as_ref().unwrap().get_max_hp());
+        g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (hp, max), 100_000);
+        assert_eq!(b.raid_target, 2, "the rival, not the player of its own side");
+        let q = queued(&g);
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].0, q[0].1, q[0].2), (MSGID_COMMAND_MOTION, OBJECTATTACK as u16, 2), "an arrow at client 2 (before the fix: 10000 + npc 0)");
+        // it gives up on a target that does not lose HP (the check reads the client's HP, not an npc's)
+        g.queue.clear();
+        (b.attacks, b.target_hp0) = (cfg.giveup_hits * 2, g.clients[2].as_ref().unwrap().hp);
+        g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (hp, max), 101_000);
+        assert_eq!((b.raid_target, b.raid_ignore.len()), (0, 1), "gave up and left that player alone");
+        assert!(queued(&g).iter().all(|q| q.1 != OBJECTATTACK as u16), "no more arrows at it");
+        // and it does not take the same player again while the time is not up
+        g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (hp, max), 102_000);
+        assert_eq!(b.raid_target, 0);
+    }
+
+    #[test]
+    fn a_raid_fights_in_melee_walks_to_the_rival_and_ends_when_the_time_is_up() {
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        add(&mut g, 1, "Bot01", ARESDEN, 0, (40, 40));
+        add(&mut g, 2, "Rival", ELVINE, 0, (41, 40));
+        g.clients[1].as_mut().unwrap().appr[1] = 0xF000u16 as i16;
+        let cfg = BotCfg { count: 6, ..Default::default() };
+        let mut b = raider(&mut g, &cfg, 1);
+        let (hp, max) = (g.clients[1].as_ref().unwrap().hp, g.clients[1].as_ref().unwrap().get_max_hp());
+        g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (hp, max), 100_000);
+        assert_eq!(queued(&g), vec![(MSGID_COMMAND_MOTION, OBJECTATTACK as u16, 2)], "next to the rival: a blow at client 2");
+        // far: it walks
+        g.queue.clear();
+        g.clients[2].as_mut().unwrap().x = 46;
+        b.raid_target = 0;
+        g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (hp, max), 105_000);
+        assert_eq!(queued(&g).iter().map(|q| q.1).collect::<Vec<_>>(), vec![OBJECTMOVE as u16]);
+        // the time is up: it goes home
+        g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (hp, max), 100_000 + cfg.raid_ms + 1);
+        assert_eq!(b.mode, Mode::Travel);
+        // hurt: it ends the raid too
+        b.mode = Mode::Raid;
+        g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (1, max), 100_500);
+        assert_eq!(b.mode, Mode::Travel, "below tired-percent");
+    }
+
+    #[test]
+    fn a_citizen_of_level_11_takes_a_quest_after_the_cool_down_and_goes_on_with_the_one_it_has() {
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        add(&mut g, 1, "Bot01", ARESDEN, 0, (40, 40));
+        let cfg = BotCfg { count: 2, ..Default::default() };
+        let mut b = Bot::made(&cfg, 1);
+        g.clients[1].as_mut().unwrap().side = crate::client::NEUTRAL;
+        assert!(!g.bot_maybe_quest(1, &mut b, &cfg, 100_000), "a neutral character is not asked");
+        (g.clients[1].as_mut().unwrap().side, g.clients[1].as_mut().unwrap().level) = (ARESDEN, 5);
+        assert!(!g.bot_maybe_quest(1, &mut b, &cfg, 100_000), "level 5 is too low");
+        g.clients[1].as_mut().unwrap().level = 12;
+        assert!(!g.bot_maybe_quest(1, &mut b, &cfg, 100_000), "the first look only starts the cool-down");
+        assert!(!g.bot_maybe_quest(1, &mut b, &cfg, 100_001), "inside the cool-down");
+        // after it, one look in two: within a few looks it goes
+        let mut t = 100_000;
+        let went = (0..30).any(|_| {
+            t += cfg.quest_minutes * 60_000 + 1;
+            g.bot_maybe_quest(1, &mut b, &cfg, t)
+        });
+        assert!(went && b.mode == Mode::Quest && b.qphase == 0, "goes to the city hall");
+        // with a quest already in the log it goes on at once, hunting
+        let mut b2 = Bot::made(&cfg, 2);
+        g.clients[1].as_mut().unwrap().quest = 3;
+        assert!(g.bot_maybe_quest(1, &mut b2, &cfg, 100_000) || g.bot_maybe_quest(1, &mut b2, &cfg, 100_000 + 1));
+        assert_eq!((b2.mode, b2.qphase), (Mode::Quest, 2), "back to the hunt phase");
+        // quests off: never
+        let off = BotCfg { quests: false, ..cfg.clone() };
+        let mut b3 = Bot::made(&off, 1);
+        assert!(!g.bot_maybe_quest(1, &mut b3, &off, 9_999_999));
+    }
+
+    #[test]
+    fn a_poor_bot_does_not_go_shopping_and_a_rich_one_with_no_potions_does() {
+        let mut default = open_map(b"default");
+        default.teleport_locs.push(TeleportLoc { src: (20, 20), dest_map: b"gshop_1".to_vec(), dest: (5, 5), dir: 1 });
+        let mut shop = open_map(b"gshop_1");
+        shop.teleport_locs.push(TeleportLoc { src: (5, 6), dest_map: b"default".to_vec(), dest: (20, 21), dir: 1 });
+        let (mut g, _rx) = world(vec![default, shop]);
+        add(&mut g, 1, "Bot01", ARESDEN, 0, (40, 40));
+        let cfg = BotCfg { count: 2, ..Default::default() };
+        let mut b = Bot::made(&cfg, 1);
+        (b.shop_cd, b.last_shop, b.home) = (1, 0, Some((0, (40, 40))));
+        assert!(!g.bot_maybe_shop(1, &mut b, &cfg, ((40, 40), 0), 100_000), "no gold, nothing to sell");
+        assert_eq!(b.mode, Mode::Hunt);
+        g.clients[1].as_mut().unwrap().items[0] = Some(item(b"Gold", 500));
+        (b.shop_cd, b.last_shop) = (1, 0);
+        assert!(g.bot_maybe_shop(1, &mut b, &cfg, ((40, 40), 0), 100_000), "gold and no red potion");
+        assert_eq!((b.mode, b.shop_map), (Mode::Shop, 1));
+        // the cool-down holds the next trip back
+        b.mode = Mode::Hunt;
+        assert!(!g.bot_maybe_shop(1, &mut b, &cfg, ((40, 40), 0), 100_001));
+        // shops off: never
+        let off = BotCfg { shop: false, ..cfg.clone() };
+        (b.shop_cd, b.last_shop) = (1, 0);
+        assert!(!g.bot_maybe_shop(1, &mut b, &off, ((40, 40), 0), 9_999_999));
+    }
+
+    #[test]
+    fn the_maps_within_reach_are_counted_in_teleports() {
+        let mut maps: Vec<Map> = ["a", "b", "c", "d", "island"].iter().map(|n| open_map(n.as_bytes())).collect();
+        for (from, to) in [(0usize, "b"), (1, "c"), (2, "d")] {
+            maps[from].teleport_locs.push(TeleportLoc { src: (1, 1), dest_map: to.as_bytes().to_vec(), dest: (2, 2), dir: 1 });
+        }
+        let (g, _rx) = world(maps);
+        assert_eq!(g.bot_hops(0, 2), vec![Some(0), Some(1), Some(2), None, None], "d is 3 teleports away, the island none");
+        assert_eq!(g.bot_hops(0, 4)[3], Some(3));
+        assert_eq!(g.bot_hops(3, 4), vec![None, None, None, Some(0), None], "one-way: nothing from d");
+    }
+
+    #[test]
+    fn a_party_follows_its_lowest_bot_and_fights_what_a_mate_fights() {
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        let cfg = BotCfg { count: 10, ..Default::default() };
+        g.bots = Bots::new(cfg.clone());
+        add(&mut g, 2, "Human", ARESDEN, 0, (5, 5));
+        add(&mut g, 3, "Bot03", ARESDEN, 0, (75, 75));
+        add(&mut g, 5, "Bot05", ARESDEN, 0, (40, 40));
+        add(&mut g, 9, "Bot09", ARESDEN, 0, (42, 40));
+        for h in [2, 3, 5, 9] {
+            g.clients[h].as_mut().unwrap().party_id = 7;
+        }
+        g.parties.insert(7, vec![2, 3, 5, 9]);
+        assert_eq!(g.bot_party_leader(5), Some(3), "a human with a lower handle is not the leader");
+        assert_eq!(g.bot_party_leader(9), Some(3));
+        assert_eq!(g.bot_party_leader(3), None, "the leader follows nobody");
+        // the mate far from the leader goes to it, while the leader hunts
+        let mut b = Bot::made(&cfg, 5);
+        g.bots.list[2].mode = Mode::Rest;
+        assert!(!g.bot_follow(5, &mut b, &cfg, ((40, 40), 0), 100_000), "the leader is not hunting");
+        g.bots.list[2].mode = Mode::Hunt;
+        assert!(g.bot_follow(5, &mut b, &cfg, ((40, 40), 0), 100_000));
+        assert_eq!((b.mode, b.home), (Mode::Travel, Some((0, (75, 75)))));
+        // close to it: it stays
+        let mut near = Bot::made(&cfg, 9);
+        g.clients[9].as_mut().unwrap().x = 70;
+        g.clients[9].as_mut().unwrap().y = 75;
+        assert!(!g.bot_follow(9, &mut near, &cfg, ((70, 75), 0), 100_000));
+        // the leader fights npc 7: the others take it, unless they gave up on it
+        g.npcs[7] = Some(Npc { map_index: 0, x: 72, y: 75, side: SIDE_HOSTILE, hp: 10, ..Default::default() });
+        g.bots.list[2].target = 7;
+        assert_eq!(g.bot_assist(9, 0, (70, 75), 8, &[]), Some(7));
+        assert_eq!(g.bot_assist(9, 0, (70, 75), 8, &[(7, 200_000)]), None);
+        assert_eq!(g.bot_assist(9, 0, (40, 40), 8, &[]), None, "too far from the monster");
+        g.clients[9].as_mut().unwrap().party_id = 0;
+        assert_eq!(g.bot_assist(9, 0, (70, 75), 8, &[]), None, "not in a party");
     }
 }
