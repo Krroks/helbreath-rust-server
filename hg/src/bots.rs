@@ -977,6 +977,12 @@ fn cheb(a: (i16, i16), b: (i16, i16)) -> i16 {
 /// A* on the 8-connected grid inside `limit` tiles of `start`: the steps (start excluded) to the first tile within
 /// `reach` of `goal` (Chebyshev), or None. `walk(x, y)` says if a tile can be entered.
 pub fn find_path(start: (i16, i16), goal: (i16, i16), reach: i16, limit: i16, walk: impl Fn(i16, i16) -> bool) -> Option<Vec<(i16, i16)>> {
+    find_path_ex(start, goal, reach, limit, false, walk)
+}
+
+/// `find_path`; with `towards`, a goal that cannot be reached inside the window gives the way to the explored tile nearest to
+/// it (a stepping stone: from there the window has moved on), or None when no tile is nearer than the start.
+pub fn find_path_ex(start: (i16, i16), goal: (i16, i16), reach: i16, limit: i16, towards: bool, walk: impl Fn(i16, i16) -> bool) -> Option<Vec<(i16, i16)>> {
     if cheb(start, goal) <= reach {
         return Some(Vec::new());
     }
@@ -993,20 +999,26 @@ pub fn find_path(start: (i16, i16), goal: (i16, i16), reach: i16, limit: i16, wa
     g[s] = 0;
     let mut open = BinaryHeap::new();
     open.push(Reverse((h(start), s)));
+    let mut best = (cheb(start, goal), s);
+    let trace = |mut k: usize, from: &[usize]| {
+        let mut path = vec![at(k)];
+        while from[k] != s {
+            k = from[k];
+            path.push(at(k));
+        }
+        path.reverse();
+        path
+    };
     while let Some(Reverse((_, i))) = open.pop() {
         if std::mem::replace(&mut done[i], true) {
             continue;
         }
         let p = at(i);
         if cheb(p, goal) <= reach {
-            let mut path = vec![p];
-            let mut k = i;
-            while from[k] != s {
-                k = from[k];
-                path.push(at(k));
-            }
-            path.reverse();
-            return Some(path);
+            return Some(trace(i, &from));
+        }
+        if cheb(p, goal) < best.0 {
+            best = (cheb(p, goal), i);
         }
         for (dx, dy) in [(0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)] {
             let q = (p.0 + dx, p.1 + dy);
@@ -1022,7 +1034,7 @@ pub fn find_path(start: (i16, i16), goal: (i16, i16), reach: i16, limit: i16, wa
             }
         }
     }
-    None
+    (towards && best.1 != s).then(|| trace(best.1, &from))
 }
 
 fn dir_to(from: (i16, i16), to: (i16, i16)) -> u8 {
@@ -3557,7 +3569,17 @@ impl Game {
                     path = find_path(pos, via, 0, limit, |x, y| map.get_moveable(x, y).0 && !map.is_teleport(x, y)).filter(|p| !p.is_empty());
                 }
             }
-            let path = path.or_else(|| find_path(pos, goal, reach, limit, |x, y| map.get_moveable(x, y).0 && (!map.is_teleport(x, y) || allow == Some((x, y)))));
+            let ok = |x: i16, y: i16| map.get_moveable(x, y).0 && (!map.is_teleport(x, y) || allow == Some((x, y)));
+            let mut path = path.or_else(|| find_path(pos, goal, reach, limit, ok));
+            if path.is_none() && matches!(b.mode, Mode::Travel | Mode::Raid | Mode::Defend | Mode::Shop | Mode::Enlist) {
+                // no way inside the window (a far goal, or walled in): walk to the explored tile nearest to it and look again from
+                // there; with none nearer, stroll to a random tile close by, so the next look starts from somewhere else
+                path = find_path_ex(pos, goal, reach, limit, true, ok).filter(|p| !p.is_empty());
+                if path.is_none() {
+                    let to = (pos.0 + self.rng.dice(1, 31) as i16 - 16, pos.1 + self.rng.dice(1, 31) as i16 - 16);
+                    path = find_path(pos, to, 0, 24, ok).filter(|p| !p.is_empty());
+                }
+            }
             match path {
                 Some(p) if !p.is_empty() => (b.path, b.path_goal) = (p, goal),
                 _ => {
@@ -3607,6 +3629,16 @@ mod tests {
         // a closed box has no route
         assert!(find_path((0, 0), (10, 0), 0, 20, |x, y| x.abs() < 3 && y.abs() < 3).is_none());
         assert_eq!(find_path((0, 0), (1, 1), 1, 5, walk), Some(vec![]));
+    }
+
+    #[test]
+    fn far_goal_gives_a_stepping_stone() {
+        // 480 tiles away, window of 50: no path, but with `towards` the way to the nearest explored tile, which is nearer
+        assert!(find_path((0, 0), (0, 480), 0, 50, |_, _| true).is_none());
+        let p = find_path_ex((0, 0), (0, 480), 0, 50, true, |_, _| true).unwrap();
+        assert_eq!(*p.last().unwrap(), (0, 50));
+        // walled in: nothing is nearer than the start
+        assert!(find_path_ex((0, 0), (0, 480), 0, 50, true, |x, y| x.abs() < 3 && y <= 0 && y > -3).is_none());
     }
 
     #[test]
