@@ -450,7 +450,7 @@ impl Game {
         w.u32(0, MSGID_RESPONSE_INITDATA);
         w.u16(4, MSGTYPE_CONFIRM as u16);
         w.u16(6, h as u16);
-        w.u16(8, (x - 14 - 5) as u16);
+        w.u16(8, (x - 17 - 5) as u16);
         w.u16(10, (y - 12 - 5) as u16);
         w.u16(12, c.type_ as u16);
         for k in 0..4 {

@@ -655,6 +655,8 @@ pub struct Bot {
     last_gear: u32,
     /// at the start of this session: exp, unix ms, kills, deaths (for the exp and kills per hour of the web page)
     sess: (u32, u64, u32, u32),
+    /// players it has killed (a raid or a defence: the player was down when it went), over its whole time since `hg` started
+    player_kills: u32,
     /// bots it has hunted with (their numbers, the most recent last, at most 5), the map it likes best
     friends: Vec<usize>,
     fav_map: Option<usize>,
@@ -1569,7 +1571,7 @@ impl Game {
             let v = &views[i];
             let guild = if v.guild.is_empty() || v.guild.starts_with("NONE") { "" } else { v.guild.as_str() };
             rows.push(format!(
-                "{{\"n\":{},\"online\":{},\"level\":{},\"exp\":{},\"nation\":\"{}\",\"guild\":{},\"rank\":{},\"class\":\"{}\",\"pace\":\"{}\",\"mode\":\"{:?}\",\"map\":{},\"x\":{},\"y\":{},\"kills\":{},\"deaths\":{},\"temper\":\"{}\",\"hobby\":\"{}\",\"friends\":{},\"seen\":{}{live}}}",
+                "{{\"n\":{},\"online\":{},\"level\":{},\"exp\":{},\"nation\":\"{}\",\"guild\":{},\"rank\":{},\"class\":\"{}\",\"pace\":\"{}\",\"mode\":\"{:?}\",\"map\":{},\"x\":{},\"y\":{},\"kills\":{},\"pkills\":{},\"deaths\":{},\"temper\":\"{}\",\"hobby\":\"{}\",\"friends\":{},\"seen\":{}{live}}}",
                 json_str(&b.ch),
                 !live.is_empty(),
                 v.level,
@@ -1584,6 +1586,7 @@ impl Game {
                 v.x,
                 v.y,
                 b.kills,
+                b.player_kills,
                 b.deaths,
                 ["cautious", "steady", "bold"][b.temper.min(2) as usize],
                 if b.hobby == 1 { "angler" } else { "" },
@@ -2503,6 +2506,8 @@ impl Game {
         }
         if b.raid_target != 0 && self.foe_pos(b.raid_target, m, enemy, defend).is_none() {
             b.raid_kills += 1;
+            // an annihilation only when the player is really down (not when it left the map or the game)
+            b.player_kills += self.clients[b.raid_target].as_ref().is_some_and(|o| o.is_killed || o.hp <= 0) as u32;
             log(&format!("(bot) {}: {} ({} in this {what})", b.ch, if defend { "the player that attacked it is gone or down" } else { "rival player down" }, b.raid_kills));
             b.raid_target = 0;
             if defend {
@@ -3838,7 +3843,14 @@ mod tests {
         assert_eq!(queued(&g), vec![(MSGID_COMMAND_MOTION, OBJECTATTACK as u16, 3)], "a blow at the player that hit it");
         g.clients[3].as_mut().unwrap().is_killed = true;
         g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (hp, max), 101_000);
-        assert_eq!((b.mode, b.raid_target), (Mode::Travel, 0), "it is over: back home");
+        assert_eq!((b.mode, b.raid_target, b.player_kills), (Mode::Travel, 0, 1), "it is over: back home, and the player counts as an annihilation");
+        // a player that only left the map is not one
+        g.clients[3].as_mut().unwrap().is_killed = false;
+        g.clients[3].as_mut().unwrap().map_index = 7;
+        (b.mode, b.raid_target, b.raid_start) = (Mode::Defend, 3, 100_000);
+        g.bot_raid(1, &mut b, &cfg, ((40, 40), 0), (hp, max), 102_000);
+        assert_eq!((b.mode, b.player_kills), (Mode::Travel, 1), "gone, not dead: no new annihilation");
+        g.clients[3].as_mut().unwrap().map_index = 0;
         // the time limit of a defence is a minute, not the raid's three
         (b.mode, b.raid_target, b.raid_start) = (Mode::Defend, 3, 100_000);
         g.clients[3].as_mut().unwrap().is_killed = false;

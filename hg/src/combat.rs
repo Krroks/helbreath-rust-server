@@ -1163,7 +1163,8 @@ impl Game {
             if w != -1 {
                 if let Some(it) = c.items[w as usize].as_ref() {
                     let (id, skill, max_life) = (it.cfg.id_num, it.cfg.related_skill, it.max_life_span);
-                    if id != ITEM_PICKAXE {
+                    // fix: the weapon configs use related skills 7-10, which in this Skill.cfg are Alchemy, Crafting, Summoning and Pretend-Corpse
+                    if id != ITEM_PICKAXE && skill > SKILL_PRETENDCORPSE {
                         let v = if !killed {
                             1
                         } else if c.hp <= 3 {

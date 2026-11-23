@@ -540,6 +540,9 @@ impl Game {
             c.super_attack_left = c.level / 10;
             c.next_level_exp = next;
             self.calc_total_item_effect(h, -1, false);
+            // fix: the C++ filled HP/MP/SP after NOTIFY_LEVELUP without telling the client, and a full bar never regenerates (no notify)
+            self.notify(h, NOTIFY_HP, &[], None);
+            self.notify(h, NOTIFY_SP, &[], None);
         }
         false
     }
