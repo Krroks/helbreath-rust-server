@@ -100,6 +100,8 @@ pub struct BotCfg {
     pub learn_spells: bool,
     pub party: bool,
     pub pace_mix: [u32; 3],
+    pub drop_pct: i32,
+    pub drop_check_ms: u32,
     pub party_range: i16,
     pub raid: bool,
     pub raid_level: i32,
@@ -149,7 +151,7 @@ impl Default for BotCfg {
             repair: true,
             repair_pct: 30,
             roam: true,
-            archetypes: vec!["warrior".into()],
+            archetypes: ["warrior", "warrior", "knight", "duelist", "mage"].map(String::from).to_vec(),
             enlist: true,
             enlist_level: 5,
             nation: "random".into(),
@@ -161,6 +163,8 @@ impl Default for BotCfg {
             learn_spells: true,
             party: true,
             pace_mix: [25, 35, 40],
+            drop_pct: 20,
+            drop_check_ms: 90_000,
             party_range: 10,
             raid: true,
             raid_level: 10,
@@ -214,7 +218,9 @@ shop-potion-item     = RedPotion  // what it buys as a potion
 shop-scroll-item     = RecallScroll
 repair               = 1          // repairs worn gear at the shop (only characters of a nation wear it out; neutral ones do not)
 repair-percent       = 30         // a trip when a worn piece is below this % of its endurance (or broke) and it can pay
-bot-archetypes       = warrior    // comma list, bot N takes entry N (cycling): warrior (str, vit, dex) or mage (int, mag, vit): where the level-up points go
+bot-archetypes       = warrior,warrior,knight,duelist,mage  // comma list, bot N takes entry N (cycling). warrior: str, vit, dex, any weapon;
+                                  // knight: vit, str, dex, one-handed weapon and shield; duelist: dex, str, vit, one-handed weapon, no shield;
+                                  // mage: int, mag, vit, empty hands once it knows an attack spell. Also the stats and looks a new character is made with
 enlist               = 1          // a neutral bot of enlist-level or more walks to its nation's city and takes the nationality
 enlist-level         = 5          // (the server asks for 5)
 bot-nation           = random     // aresden, elvine or random
@@ -226,6 +232,8 @@ cast-ms              = 1500       // time between two casts
 learn-spells         = 1          // buys an attack spell it can learn (Int) at the shop
 bot-pace-mix         = 25,35,40   // weights of the paces relaxed, steady and driven: how many bots are slow and easy-going (slower steps and
                                   // blows, a pause after each kill, now and then a few minutes of standing about), middling or as fast as the other keys say
+drop-percent         = 20         // every drop-check-ms, between two fights, this % that it drops on the ground one thing it does not care about (loot
+drop-check-ms        = 90000      // it would sell, gear it will never wear); 0 = never. Other bots and players may pick it up
 party                = 1          // bots of the same map and side near each other form parties (they share the exp)
 party-range          = 10
 raid                 = 1          // a citizen of raid-level or more now and then spends raid-ms in a map of the rival nation, fighting its players
@@ -292,6 +300,8 @@ impl BotCfg {
                         warn.push(format!("bot-pace-mix wants three weights like 25,35,40, got '{v}'"));
                     }
                 }
+                ("drop-percent", Some(x)) => c.drop_pct = x.clamp(0, 100) as i32,
+                ("drop-check-ms", Some(x)) => c.drop_check_ms = x.max(1000) as u32,
                 ("party-range", Some(x)) => c.party_range = x.clamp(2, 20) as i16,
                 ("raid-level", Some(x)) => c.raid_level = x.clamp(1, 180) as i32,
                 ("raid-cooldown-ms", Some(x)) => c.raid_cooldown_ms = x.max(0) as u32,
@@ -336,6 +346,51 @@ impl BotCfg {
 }
 
 // ------------------------------------------------------------------ state
+
+/// The archetypes: warrior 0, mage 1, knight 2, duelist 3.
+fn arch_id(name: &str) -> Option<u8> {
+    ["warrior", "mage", "knight", "duelist"].iter().position(|a| *a == name).map(|i| i as u8)
+}
+
+/// Archetype of bot `i` (1-based): entry `i` of `bot-archetypes`, cycling.
+fn arch_of(cfg: &BotCfg, i: usize) -> u8 {
+    cfg.archetypes.get((i - 1) % cfg.archetypes.len().max(1)).and_then(|a| arch_id(a)).unwrap_or(0)
+}
+
+/// Where the three level-up points go (stat index: str 0, vit 1, dex 2, int 3, mag 4), cycling.
+const POINTS: [[usize; 4]; 4] = [[0, 1, 0, 2], [3, 4, 3, 1], [1, 0, 1, 2], [2, 0, 2, 1]];
+
+/// The stats a new character starts with (str, vit, dex, int, mag, agi: 10-14 each, 70 in all).
+const START_STATS: [[u8; 6]; 4] = [[14, 12, 12, 10, 10, 12], [10, 10, 10, 14, 14, 12], [13, 14, 11, 10, 10, 12], [12, 10, 14, 10, 10, 14]];
+
+/// The looks a new character is made with, spread by a hash of the bot's number: gender 1-2, skin 1-3, hair style 0-7,
+/// hair colour 0-15, underwear colour 0-7.
+fn look_of(i: usize) -> [u8; 5] {
+    let h = (i as u32).wrapping_mul(2_654_435_761) ^ 0x9E37_79B9;
+    let h = h ^ (h >> 15);
+    let h = h.wrapping_mul(2_246_822_519);
+    [1 + (h >> 28) as u8 % 2, 1 + (h >> 8) as u8 % 3, (h >> 12) as u8 % 8, (h >> 16) as u8 % 16, (h >> 20) as u8 % 8]
+}
+
+/// What the bot's class lets it wear: a mage that can cast has empty hands, a knight or a duelist a one-handed weapon,
+/// a duelist no shield.
+#[derive(Clone, Copy, Default)]
+struct Role {
+    mage: bool,
+    one_hand: bool,
+    no_shield: bool,
+}
+
+fn role_of(arch: u8, casts: bool) -> Role {
+    Role { mage: arch == 1 && casts, one_hand: arch >= 2, no_shield: arch == 3 }
+}
+
+impl Role {
+    /// Positions it will not fill.
+    fn refuses(self, pos: i32) -> bool {
+        (self.mage && matches!(pos, EQUIPPOS_RHAND | EQUIPPOS_TWOHAND | EQUIPPOS_LHAND)) || (self.one_hand && pos == EQUIPPOS_TWOHAND) || (self.no_shield && pos == EQUIPPOS_LHAND)
+    }
+}
 
 /// How a bot plays: multipliers of `step-ms`, `attack-ms` and `sight`, the pause after a kill (min, max ms) and the
 /// breaks (about every `break_every` ms it stands about for about `break_len` ms; 0 = never). Each bot then gets +-15 %.
@@ -406,7 +461,7 @@ pub struct Bot {
     sell_tried: Vec<(usize, u32)>,
     repair_tried: Vec<usize>,
     idle_since: Option<u32>,
-    /// 0 warrior, 1 mage: where the level-up points go (and `pt_pos`: the next point of the cycle)
+    /// the archetype (`arch_id`): where the level-up points go (and `pt_pos`: the next point of the cycle) and what it wears
     arch: u8,
     pt_pos: usize,
     last_points: u32,
@@ -431,6 +486,7 @@ pub struct Bot {
     raid_target: usize,
     raid_kills: u32,
     last_level: i32,
+    last_drop_check: u32,
     /// its pace (index in PACES) and what that makes of the timings
     pace: usize,
     step_ms: u32,
@@ -470,7 +526,6 @@ impl Bots {
     pub fn new(cfg: BotCfg) -> Bots {
         let list = (1..=cfg.count)
             .map(|i| {
-                let a = cfg.archetypes.get((i - 1) % cfg.archetypes.len().max(1)).map_or("warrior", |a| a.as_str());
                 // the pace: bot i takes a slot of 0..100 spread by a multiplicative hash, the mix cuts the slots
                 let total: u32 = cfg.pace_mix.iter().sum();
                 let slot = (i as u32).wrapping_mul(2_654_435_761) % 100 * total / 100;
@@ -480,7 +535,7 @@ impl Bots {
                 Bot {
                     acc: format!("{}{i:02}", cfg.account_prefix),
                     ch: format!("{}{i:02}", cfg.name_prefix),
-                    arch: (a == "mage") as u8,
+                    arch: arch_of(&cfg, i),
                     pace,
                     step_ms: ((cfg.step_ms as f32 * p.step * j(3)) as u32).max(MIN_STEP_MS),
                     attack_ms: ((cfg.attack_ms as f32 * p.attack * j(5)) as u32).max(MIN_ATTACK_MS),
@@ -530,11 +585,12 @@ async fn login_call(addr: &str, b: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Creates the account and character when missing (the Login refuses duplicates), then asks to enter the game.
-async fn login(addr: &str, acc: &[u8], ch: &[u8], pwd: &[u8]) -> bool {
+async fn login(addr: &str, acc: &[u8], ch: &[u8], pwd: &[u8], look: [u8; 5], stats: [u8; 6]) -> bool {
     let f: &[(&[u8], usize)] = &[(acc, 10), (pwd, 10), (b"bot@example.invalid", 50), (b" ", 10), (b"30", 10), (b" ", 4), (b" ", 2), (b" ", 2), (b"Nowhere", 17), (b"", 28), (b"bot quiz?", 45), (b"bot answer", 20), (b"", 50)];
     let _ = login_call(addr, &body(CREATENEWACCOUNT, 0, f, 264)).await;
     let mut b = body(CREATENEWCHARACTER, 0, &[(ch, 10), (acc, 10), (pwd, 10), (b"WS1", 30)], 66);
-    b.extend_from_slice(&[1, 1, 1, 1, 1, 10, 10, 10, 14, 14, 12]);
+    b.extend_from_slice(&look);
+    b.extend_from_slice(&stats);
     let _ = login_call(addr, &b).await;
     let mut b = body(MSGID_REQUEST_ENTERGAME, ENTERGAMEMSGTYPE_NEW as u16, &[(ch, 10), (b"", 10), (acc, 10), (pwd, 10), (b"WS1", 10)], 56);
     b.extend_from_slice(&1i32.to_le_bytes());
@@ -552,7 +608,7 @@ pub async fn run_bot(n: usize, cfg: Arc<BotCfg>, acc: String, ch: String, ev: Un
         while !READY.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        if !login(&cfg.login, acc.as_bytes(), ch.as_bytes(), pwd).await {
+        if !login(&cfg.login, acc.as_bytes(), ch.as_bytes(), pwd, look_of(n + 1), START_STATS[arch_of(&cfg, n + 1) as usize]).await {
             log(&format!("(bot) {ch}: login refused, retrying"));
             tokio::time::sleep(Duration::from_millis(cfg.relogin_ms)).await;
             continue;
@@ -695,18 +751,30 @@ fn is_loot(it: &Item) -> bool {
     it.count > 0 && it.cfg.item_type != 1 && (11..=50).contains(&it.cfg.category) && !is_potion(it) && !is_recall_scroll(it) && it.cfg.name.get(..4) != Some(b"Gold")
 }
 
+/// The bag slots it does not care about: loot a shop would buy and gear it will never wear (the item it has just sent
+/// the equip command for is not one yet).
+fn junk_slots(c: &Client, b: &Bot, role: Role, now: u32) -> Vec<usize> {
+    c.items
+        .iter()
+        .enumerate()
+        .filter(|(k, i)| i.as_ref().is_some_and(|i| (is_loot(i) || is_surplus(c, *k, i, &b.equip_tried, role)) && !(b.last_equip_slot.0 == *k && now.wrapping_sub(b.last_equip_slot.1) < 10_000)))
+        .map(|(k, _)| k)
+        .collect()
+}
+
 /// Gear (item type 1, shop category 1-50: weapons, armour, cloaks, necklaces) it will never wear: a weapon no better than
 /// the one in hand, a piece for a slot already filled, one for a slot it never fills (it only wears head, body, arms,
 /// legs and a shield) or one the server refused to equip. Gear for an empty slot stays: `bot_equip` will put it on.
 /// A broken piece (0 endurance) is not surplus: the shop repairs it.
-fn is_surplus(c: &Client, k: usize, it: &Item, tried: &[usize], mage: bool) -> bool {
+fn is_surplus(c: &Client, k: usize, it: &Item, tried: &[usize], role: Role) -> bool {
     let pos = it.cfg.equip_pos;
     let eq = |p: i32| c.equip_status.get(p as usize).copied().unwrap_or(-1);
     if it.count == 0 || it.cfg.item_type != 1 || !(1..=50).contains(&it.cfg.category) || it.cur_life_span == 0 || eq(pos) == k as i16 {
         return false;
     }
-    if tried.contains(&k) || (mage && matches!(pos, EQUIPPOS_RHAND | EQUIPPOS_TWOHAND | EQUIPPOS_LHAND)) {
-        return true; // a mage casts with empty hands: the server refuses spells with a weapon or a shield
+    let gender = if (1..=3).contains(&c.type_) { 1 } else if (4..=6).contains(&c.type_) { 2 } else { 0 };
+    if tried.contains(&k) || role.refuses(pos) || (it.cfg.gender_limit != 0 && gender != 0 && it.cfg.gender_limit != gender) {
+        return true; // e.g. a mage casts with empty hands (the server refuses spells with a weapon or a shield), or it is made for the other gender
     }
     match pos {
         EQUIPPOS_RHAND | EQUIPPOS_TWOHAND => {
@@ -738,14 +806,14 @@ fn repair_slot(c: &Client, equipped_once: &[usize], done: &[usize], pct: i32, go
 
 /// What wearing `it` would bring, or None when the bot cannot or will not: level, gender, weight and stat limits, and
 /// only a better weapon, a piece for an empty armour slot or a shield without a two-handed weapon.
-fn wear_score(c: &Client, it: &Item, mage: bool) -> Option<i32> {
+fn wear_score(c: &Client, it: &Item, role: Role) -> Option<i32> {
     let gender = if (1..=3).contains(&c.type_) { 1 } else if (4..=6).contains(&c.type_) { 2 } else { 0 };
     if (it.attribute & 1 == 0 && it.cfg.level_limit > c.level) || (it.cfg.gender_limit != 0 && it.cfg.gender_limit != gender) || it.weight_of(1) > c.get_str() * 100 {
         return None;
     }
     let eq = |pos: i32| c.equip_status.get(pos as usize).copied().unwrap_or(-1);
     let pos = it.cfg.equip_pos;
-    if mage && matches!(pos, EQUIPPOS_RHAND | EQUIPPOS_TWOHAND | EQUIPPOS_LHAND) {
+    if role.refuses(pos) {
         return None;
     }
     match pos {
@@ -897,8 +965,9 @@ impl Game {
     fn bot_equip(&mut self, h: usize, b: &mut Bot) {
         let Some(c) = self.clients[h].as_ref() else { return };
         b.equip_tried.retain(|&k| c.items.get(k).is_some_and(|i| i.is_some())); // a freed slot may hold something new
+        let role = self.bot_role(h, b);
         let eq = |pos: i32| c.equip_status.get(pos as usize).copied().unwrap_or(-1);
-        if b.arch == 1 {
+        if role.mage {
             if let Some(k) = [EQUIPPOS_RHAND, EQUIPPOS_TWOHAND, EQUIPPOS_LHAND].into_iter().map(eq).find(|&k| k >= 0) {
                 let pos = (c.x, c.y);
                 log(&format!("(bot) {}: puts away what it holds in its hands (slot {k}): spells need empty hands", b.ch));
@@ -912,7 +981,7 @@ impl Game {
             if it.cfg.item_type != 1 || it.cur_life_span == 0 || b.equip_tried.contains(&k) || eq(it.cfg.equip_pos) == k as i16 {
                 continue;
             }
-            if let Some(score) = wear_score(c, it, b.arch == 1) {
+            if let Some(score) = wear_score(c, it, role) {
                 if best.is_none_or(|(s, _)| score > s) {
                     best = Some((score, k));
                 }
@@ -1176,6 +1245,9 @@ impl Game {
                 }
             }
         }
+        if b.target == 0 && !tired && self.bot_maybe_drop(h, b, cfg, pos, now) {
+            return;
+        }
         if b.target == 0 && !tired && (self.bot_maybe_shop(h, b, cfg, (pos, m), now) || (cfg.loot && self.bot_loot(h, b, cfg, (pos, m), now))) {
             return;
         }
@@ -1256,6 +1328,14 @@ impl Game {
         }
     }
 
+    /// What its class lets it wear now: a mage only gives up its weapons once it has an attack spell to cast with.
+    fn bot_role(&self, h: usize, b: &Bot) -> Role {
+        let casts = self.clients[h].as_ref().is_some_and(|c| {
+            self.data.magic.iter().enumerate().any(|(i, f)| c.magic_mastery.get(i) == Some(&1) && f.as_deref().and_then(Spell::parse).is_some_and(|sp| sp.category == 1 && matches!(sp.ty, 1 | 3) && sp.cost >= 0))
+        });
+        role_of(b.arch, casts)
+    }
+
     /// The attack spell it could cast now: learned (mastery 1), a damage type, the strongest (the dearest) it has the mana for.
     /// (index, mana).
     fn bot_attack_spell(&self, h: usize) -> Option<(usize, i32)> {
@@ -1304,10 +1384,10 @@ impl Game {
         true
     }
 
-    /// Spends the level-up points (3 a level) as the archetype wants: warrior str, vit, str, dex; mage int, mag, int, vit.
+    /// Spends the level-up points (3 a level) as the archetype wants (`POINTS`).
     fn bot_points(&mut self, h: usize, b: &mut Bot) {
         let pool = c_pool(self, h).min(30);
-        let cycle: [usize; 4] = if b.arch == 1 { [3, 4, 3, 1] } else { [0, 1, 0, 2] };
+        let cycle = POINTS[b.arch as usize];
         let mut v = [0u8; 6];
         for _ in 0..pool {
             v[cycle[b.pt_pos % 4]] += 1;
@@ -1379,18 +1459,18 @@ impl Game {
 
     /// The best thing it could buy now with `gold - reserve`: armour for an empty slot first (the best defence), else a
     /// better weapon. (name, price). Not what it already carries to wear, nor what it tried.
-    fn bot_wish(&self, h: usize, gold: u32, reserve: u32, tried: &[Vec<u8>], mage: bool) -> Option<(Vec<u8>, u32)> {
+    fn bot_wish(&self, h: usize, gold: u32, reserve: u32, tried: &[Vec<u8>], role: Role) -> Option<(Vec<u8>, u32)> {
         let c = self.clients[h].as_ref()?;
         let budget = gold.checked_sub(reserve)?;
         let eq = |pos: i32| c.equip_status.get(pos as usize).copied().unwrap_or(-1);
-        let carried: Vec<(i32, i32)> = c.items.iter().enumerate().filter_map(|(k, i)| i.as_ref().filter(|i| i.cfg.item_type == 1 && eq(i.cfg.equip_pos) != k as i16).map(|i| (i.cfg.equip_pos, wear_score(c, i, mage).unwrap_or(-1)))).collect();
+        let carried: Vec<(i32, i32)> = c.items.iter().enumerate().filter_map(|(k, i)| i.as_ref().filter(|i| i.cfg.item_type == 1 && eq(i.cfg.equip_pos) != k as i16).map(|i| (i.cfg.equip_pos, wear_score(c, i, role).unwrap_or(-1)))).collect();
         let (mut armour, mut weapon): (Option<(i32, &crate::gamedata::ItemCfg)>, Option<(i32, &crate::gamedata::ItemCfg)>) = (None, None);
         for cfg in self.data.items.iter().flatten() {
             if !cfg.is_for_sale || cfg.price == 0 || cfg.price as u32 > budget || cfg.item_type != 1 || tried.iter().any(|t| *t == cfg.name) {
                 continue;
             }
             let it = Item::new(cfg);
-            let Some(score) = wear_score(c, &it, mage) else { continue };
+            let Some(score) = wear_score(c, &it, role) else { continue };
             let pos = cfg.equip_pos;
             let is_weapon = pos == EQUIPPOS_RHAND || pos == EQUIPPOS_TWOHAND;
             if carried.iter().any(|&(p, s)| s >= 0 && ((p == pos) || (is_weapon && (p == EQUIPPOS_RHAND || p == EQUIPPOS_TWOHAND)) && s >= score)) {
@@ -1521,11 +1601,12 @@ impl Game {
             return false;
         }
         let (pos, m) = at;
+        let role = self.bot_role(h, b);
         let (potions, scrolls) = (self.bot_count(h, is_potion), self.bot_count(h, is_recall_scroll));
         let bag = self.clients[h].as_ref().map_or(0, |c| c.items.iter().flatten().count());
         let gold = self.item_count(h, b"Gold").1;
         let worn = cfg.repair && self.clients[h].as_ref().is_some_and(|c| repair_slot(c, &b.equip_tried, &[], cfg.repair_pct, gold).is_some());
-        let wish = cfg.buy_gear && self.bot_wish(h, gold, cfg.gear_reserve, &b.wish_tried, b.arch == 1).is_some();
+        let wish = cfg.buy_gear && self.bot_wish(h, gold, cfg.gear_reserve, &b.wish_tried, role).is_some();
         let spell = cfg.learn_spells && self.bot_spell_wish(h, gold, cfg.gear_reserve, &b.spell_tried).is_some();
         let low = (cfg.use_potions && potions < cfg.shop_potion_min) || (cfg.use_recall && scrolls < cfg.shop_scroll_min) || worn || wish || spell;
         let full = cfg.sell_loot && bag >= cfg.shop_bag_slots;
@@ -1535,7 +1616,7 @@ impl Game {
         let neutral = self.clients[h].as_ref().is_some_and(|c| c.is_neutral());
         let mut wealth = self.item_count(h, b"Gold").1 as i64;
         if cfg.sell_loot {
-            wealth += self.clients[h].as_ref().map_or(0, |c| c.items.iter().enumerate().filter_map(|(k, i)| i.as_ref().filter(|i| is_loot(i) || is_surplus(c, k, i, &b.equip_tried, b.arch == 1))).map(|i| sell_price(i, i.count as i32, neutral).unwrap_or(0) as i64).sum::<i64>());
+            wealth += self.clients[h].as_ref().map_or(0, |c| c.items.iter().enumerate().filter_map(|(k, i)| i.as_ref().filter(|i| is_loot(i) || is_surplus(c, k, i, &b.equip_tried, role))).map(|i| sell_price(i, i.count as i32, neutral).unwrap_or(0) as i64).sum::<i64>());
         }
         let cheapest = self.data.item_by_name(cfg.shop_potion_item.as_bytes()).map_or(30, |i| i.price as i64);
         b.last_shop = now; // whatever happens below, the next look is after the cool-down
@@ -1561,6 +1642,7 @@ impl Game {
     /// The shopping trip: go to the shop map, sell the loot one item at a time, buy up to the targets, then go home.
     fn bot_shop(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), now: u32) {
         let (pos, m) = at;
+        let role = self.bot_role(h, b);
         if now.wrapping_sub(b.shop_start) > 180_000 {
             log(&format!("(bot) {}: the shopping trip takes too long, going home", b.ch));
             (b.mode, b.no_route_logged, b.last_shop) = (Mode::Travel, false, now);
@@ -1580,7 +1662,7 @@ impl Game {
         }
         if cfg.sell_loot {
             let c = self.clients[h].as_ref().unwrap();
-            let slot = c.items.iter().enumerate().find(|(k, i)| i.as_ref().is_some_and(|i| (is_loot(i) || is_surplus(c, *k, i, &b.equip_tried, b.arch == 1)) && !b.sell_tried.contains(&(*k, i.count)) && !(b.last_equip_slot.0 == *k && now.wrapping_sub(b.last_equip_slot.1) < 10_000)));
+            let slot = junk_slots(c, b, role, now).into_iter().find(|k| c.items[*k].as_ref().is_some_and(|i| !b.sell_tried.contains(&(*k, i.count)))).map(|k| (k, &c.items[k]));
             if let Some((k, Some(it))) = slot {
                 let n = it.count;
                 b.sell_tried.push((k, n));
@@ -1614,7 +1696,7 @@ impl Game {
             }
         }
         if cfg.buy_gear && b.wish_buys < 4 {
-            if let Some((name, price)) = self.bot_wish(h, gold, cfg.gear_reserve, &b.wish_tried, b.arch == 1) {
+            if let Some((name, price)) = self.bot_wish(h, gold, cfg.gear_reserve, &b.wish_tried, role) {
                 log(&format!("(bot) {}: buys {} ({price} of {gold} gold)", b.ch, String::from_utf8_lossy(&name)));
                 (b.wish_buys, b.last_trade) = (b.wish_buys + 1, now);
                 b.wish_tried.push(name.clone());
@@ -1649,6 +1731,34 @@ impl Game {
         log(&format!("(bot) {}: shopping done ({} potions, {} scrolls, {gold} gold), going home", b.ch, self.bot_count(h, is_potion), self.bot_count(h, is_recall_scroll)));
         (b.mode, b.no_route_logged, b.last_shop) = (Mode::Travel, false, now);
         b.path.clear();
+    }
+
+    /// Every `drop-check-ms` there is a `drop-percent` chance that it leaves one thing it does not care about on the ground
+    /// (a player empties his bag like that now and then). The tile is left alone by its own looting for 10 minutes.
+    fn bot_maybe_drop(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, pos: (i16, i16), now: u32) -> bool {
+        if cfg.drop_pct == 0 || now.wrapping_sub(b.last_drop_check) < cfg.drop_check_ms {
+            return false;
+        }
+        b.last_drop_check = now;
+        if self.dice(1, 100) > cfg.drop_pct {
+            return false;
+        }
+        let role = self.bot_role(h, b);
+        let Some(c) = self.clients[h].as_ref() else { return false };
+        let junk = junk_slots(c, b, role, now);
+        if junk.is_empty() {
+            return false;
+        }
+        let k = junk[self.dice(1, junk.len() as i32) as usize - 1];
+        let name = self.clients[h].as_ref().unwrap().items[k].as_ref().unwrap().cfg.name.clone();
+        log(&format!("(bot) {}: drops {} (slot {k}) on the ground", b.ch, String::from_utf8_lossy(crate::util::cstr(&name))));
+        let mut f = common(COMMONTYPE_ITEMDROP, pos, k as u32);
+        let mut w = W(&mut f);
+        w.u32(15, u32::MAX); // the whole stack
+        w.bytes(23, &name);
+        self.bot_send(h, f);
+        b.loot_skip.push((pos, now.wrapping_add(600_000)));
+        true
     }
 
     /// Picks up what lies near it: walks to the closest tile with items and sends the get-item command until it is empty
@@ -1781,17 +1891,17 @@ mod tests {
         c.items[4] = Some(gear(EQUIPPOS_BODY, 1)); // slot taken by 5
         c.items[5] = Some(gear(EQUIPPOS_BODY, 1));
         (c.equip_status[EQUIPPOS_RHAND as usize], c.equip_status[EQUIPPOS_BODY as usize]) = (0, 5);
-        let sur = |k: usize, tried: &[usize]| is_surplus(&c, k, c.items[k].as_ref().unwrap(), tried, false);
+        let sur = |k: usize, tried: &[usize]| is_surplus(&c, k, c.items[k].as_ref().unwrap(), tried, Role::default());
         assert!(!sur(0, &[]) && sur(1, &[]) && !sur(2, &[]) && !sur(3, &[]) && sur(4, &[]) && !sur(5, &[]));
         assert!(sur(3, &[3]), "a piece the server refused is surplus");
         // a necklace is never worn by the bot; armour (category 11) is not "loot" and goes through the same rules
         let mut neck = gear(EQUIPPOS_NECK, 1);
         neck.cfg.category = 46;
-        assert!(is_surplus(&c, 6, &neck, &[], false) && !is_loot(&neck));
+        assert!(is_surplus(&c, 6, &neck, &[], Role::default()) && !is_loot(&neck));
         // a broken piece is repaired, not sold
         let mut broken = gear(EQUIPPOS_HEAD, 1);
         (broken.max_life_span, broken.cur_life_span) = (100, 0);
-        assert!(!is_surplus(&c, 6, &broken, &[], false));
+        assert!(!is_surplus(&c, 6, &broken, &[], Role::default()));
     }
 
     #[test]
@@ -1812,6 +1922,44 @@ mod tests {
     }
 
     #[test]
+    fn junk_is_loot_and_spare_gear_but_not_what_is_being_worn() {
+        let (tx, _rx) = unbounded_channel();
+        let mut c = Client::new(1, 1, tx, b"1.2.3.4".to_vec(), 0);
+        let b = Bot::default();
+        let mut jelly = Item::new(&Default::default());
+        (jelly.cfg.item_type, jelly.cfg.category, jelly.cfg.name) = (crate::life::ITEMTYPE_CONSUME, 20, b"Jelly".to_vec());
+        let mut potion = jelly.clone();
+        (potion.cfg.item_type, potion.cfg.item_effect_type, potion.cfg.name) = (ITEMTYPE_USE_DEPLETE, ITEMEFFECTTYPE_HP, b"RedPotion".to_vec());
+        let mut spare = Item::new(&Default::default());
+        (spare.cfg.item_type, spare.cfg.category, spare.cfg.equip_pos, spare.cfg.item_effect_value[0], spare.cfg.item_effect_value[1]) = (1, 1, EQUIPPOS_RHAND, 1, 1);
+        (spare.max_life_span, spare.cur_life_span) = (100, 100);
+        let mut worn = spare.clone();
+        worn.cfg.item_effect_value[1] = 9;
+        (c.items[0], c.items[1], c.items[2], c.items[3]) = (Some(jelly), Some(potion), Some(worn), Some(spare));
+        c.equip_status[EQUIPPOS_RHAND as usize] = 2;
+        assert_eq!(junk_slots(&c, &b, Role::default(), 100_000), vec![0, 3], "the jelly and the weaker spare weapon: not the potion, not the wielded one");
+        let b = Bot { last_equip_slot: (3, 99_000), ..Default::default() };
+        assert_eq!(junk_slots(&c, &b, Role::default(), 100_000), vec![0], "a piece it has just sent the equip command for is not junk yet");
+    }
+
+    #[test]
+    fn classes_differ_in_points_stats_looks_and_gear() {
+        let cfg = BotCfg { count: 10, ..Default::default() };
+        let arch: Vec<u8> = (1..=10).map(|i| arch_of(&cfg, i)).collect();
+        assert_eq!(arch, vec![0, 0, 2, 3, 1, 0, 0, 2, 3, 1], "warrior, warrior, knight, duelist, mage, cycling");
+        for st in START_STATS {
+            assert!(st.iter().sum::<u8>() == 70 && st.iter().all(|v| (10..=14).contains(v)), "{st:?}: the Login only takes 10-14 each and 70 in all");
+        }
+        let looks: std::collections::HashSet<[u8; 5]> = (1..=50).map(look_of).collect();
+        assert!(looks.len() > 30, "{} different looks in 50", looks.len());
+        assert!((1..=50).map(look_of).all(|l| (1..=2).contains(&l[0]) && (1..=3).contains(&l[1]) && l[2] < 8 && l[3] < 16 && l[4] < 8));
+        // a knight takes no two-handed weapon, a duelist neither shield nor two-handed
+        assert!(role_of(2, false).refuses(EQUIPPOS_TWOHAND) && !role_of(2, false).refuses(EQUIPPOS_LHAND));
+        assert!(role_of(3, false).refuses(EQUIPPOS_LHAND) && role_of(3, false).refuses(EQUIPPOS_TWOHAND) && !role_of(3, false).refuses(EQUIPPOS_RHAND));
+        assert!(!role_of(0, false).refuses(EQUIPPOS_TWOHAND) && !role_of(1, false).refuses(EQUIPPOS_RHAND));
+    }
+
+    #[test]
     fn a_mage_keeps_its_hands_empty() {
         let (tx, _rx) = unbounded_channel();
         let mut c = Client::new(1, 1, tx, b"1.2.3.4".to_vec(), 0);
@@ -1819,11 +1967,13 @@ mod tests {
         let mut w = Item::new(&Default::default());
         (w.cfg.item_type, w.cfg.category, w.cfg.equip_pos, w.cfg.item_effect_type, w.cfg.item_effect_value[0], w.cfg.item_effect_value[1]) = (1, 1, EQUIPPOS_RHAND, ITEMEFFECTTYPE_ATTACK, 1, 6);
         (w.max_life_span, w.cur_life_span) = (100, 100);
-        assert!(wear_score(&c, &w, false).is_some(), "a warrior wields it");
-        assert!(wear_score(&c, &w, true).is_none() && is_surplus(&c, 0, &w, &[], true), "a mage neither wears nor keeps it");
+        assert!(wear_score(&c, &w, Role::default()).is_some(), "a warrior wields it");
+        let mage = role_of(1, true);
+        assert!(wear_score(&c, &w, mage).is_none() && is_surplus(&c, 0, &w, &[], mage), "a mage that can cast neither wears nor keeps it");
+        assert!(wear_score(&c, &w, role_of(1, false)).is_some(), "a mage that cannot cast yet fights with it");
         let mut shield = w.clone();
         shield.cfg.equip_pos = EQUIPPOS_LHAND;
-        assert!(wear_score(&c, &shield, true).is_none());
+        assert!(wear_score(&c, &shield, mage).is_none());
     }
 
     #[test]

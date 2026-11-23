@@ -1284,6 +1284,18 @@ Behaviour (modes `Hunt`, `Rest`, `Travel`):
   2-7 s of getting its breath after every kill, and about every 4 minutes a break of about 45 s standing about (it is woken if something
   hurts it); steady: x1.3 / x1.2, sight x0.85, 0.6-3 s, a 25 s break every 10 minutes; driven: the keys as they are (what the bots did
   before). Every bot then gets +-15 % on each value, so no two are quite alike; the server's speed-hack floors (150 ms, 220 ms) still hold.
+- dropping junk (`drop-percent`, `drop-check-ms`): every `drop-check-ms` (90 s), between two fights, there is a `drop-percent` (20 %)
+  chance that it drops one thing it does not care about on the ground (`COMMONTYPE_ITEMDROP`, the whole stack): `junk_slots`, the
+  same set the shop sale uses (loot a shop would buy, gear it will never wear, a mage's weapons), never the potions and scrolls it
+  uses nor what it has just sent the equip command for. Its own looting leaves that tile alone for 10 minutes; other bots and players
+  may pick the item up.
+- classes (`bot-archetypes`, default `warrior,warrior,knight,duelist,mage`: bot N takes entry N, cycling): each has its own level-up
+  points (`POINTS`: warrior str/vit/dex, knight vit/str/dex, duelist dex/str/vit, mage int/mag/vit), its own starting stats (`START_STATS`,
+  10-14 each and 70 in all as the Login asks) and what it wears (`Role`): a knight a one-handed weapon and a shield, a duelist a one-handed
+  weapon and no shield, a warrior anything, a mage empty hands but only once it knows an attack spell (before that it fights with its
+  weapon). A new character is also made with its own look (`look_of`: gender, skin, hair style and colour, underwear colour, spread by a
+  hash of the bot's number); gear made for the other gender is surplus. Characters that already exist keep their stats; their look can be
+  changed in `char_database` (Gender, Skin, HairStyle, HairColor, Underwear, Appr1) while `hg` is stopped.
 Not yet: fleeing on foot, guilds (creating one asks for level 20 and 20 charisma), the crusade and the other events, fight zones
 (they need a reservation and a ticket), quests.
 
@@ -1312,4 +1324,8 @@ Casting, party and raid (levels set by SQL, all in `elvfarm`): the mage put its 
 the first two bots formed a party, and two opposite-side citizens raided each other (`rival player down`, bots died and restarted).
 Paces (12 new bots, prefix `tst`, 4.5 minutes from the spawn): kills per bot 15 on average for the 6 driven ones (5-30), 4.5 for the 4
 steady ones and 0.5 for the 2 relaxed ones (walking at 780-820 ms a step, blows at 0.9-1.1 s, a 46 s break); the mix gave 6 / 4 / 2.
+Dropping (3 bots, `drop-percent = 100`, `drop-check-ms = 5000`, `primary-drop-rate = 8000`): 7 drops in 200 s (a mage's starting dagger, potions
+of other kinds, loot); another bot went to pick the first one up.
+Classes (10 new bots, prefix `tst`): looks and starting stats differ per bot; after 2-5 levels the knight had 20 vit, the duelist 16 dex, the
+mage 16 int and 15 mag, the warrior 16 str.
 Remove the rows afterwards (`char_database`, `item`, `bank_item`, `skill`, `account_database` for the bot names).
