@@ -1642,8 +1642,26 @@ impl Server {
             MSGID_REQUEST_LGNPTS => self.request_legion_pts(d.at(6), sock, db).await,
             MSGID_REQUEST_LGNSVC => self.request_legion_svc(d.at(4), sock, db).await,
             MSGID_SUBCASH => self.sub_account_cash(d.at(6), db).await,
+            MSGID_REQUEST_BOTMEM => self.request_bot_memory(d.at(6), sock, db).await,
+            MSGID_BOTMEM_SAVE => save_bot_memory(d.at(6), db).await,
             _ => {}
         }
+    }
+
+    /// A game server asks for what bot `d[0..10]` remembers: the reply carries the stored text (hex), empty when there is none.
+    async fn request_bot_memory(&mut self, d: Rd<'_>, sock: usize, db: &mut Db) {
+        let bot = d.s(0, 10);
+        if bot.is_empty() || !bot_memory_table(db).await {
+            return;
+        }
+        let Some(r) = db.qs(&format!("SELECT `data` FROM `bot_memory` WHERE `bot` = '{}' LIMIT 1;", good(&bot))).await else { return };
+        let data = if r.rows.len() == 1 { r.get(0, 0).to_vec() } else { Vec::new() };
+        let mut b = vec![0u8; 16 + data.len() + 1];
+        W(&mut b).u32(0, MSGID_RESPONSE_BOTMEM);
+        W(&mut b).u16(4, LOGRESMSGTYPE_CONFIRM);
+        W(&mut b).bytes(6, &bot);
+        W(&mut b).bytes(16, &data);
+        self.send_msg_to_gs(sock, &b);
     }
 
     async fn process_request_player_data(&mut self, d: Rd<'_>, sock: usize, db: &mut Db) {
@@ -2455,6 +2473,28 @@ impl Server {
     }
 }
 
+/// 0 not tried, 1 the `bot_memory` table is there, 2 it could not be made (a failed query makes `Db::q` retry for 10 s: never again).
+static BOTMEM_TABLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Makes the table of the bots' memory the first time it is needed.
+async fn bot_memory_table(db: &mut Db) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if BOTMEM_TABLE.load(Relaxed) == 0 {
+        let ok = db.qs("CREATE TABLE IF NOT EXISTS `bot_memory` (`bot` varchar(10) NOT NULL, `data` mediumtext NOT NULL, `updated` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`bot`)) ENGINE=InnoDB;").await.is_some();
+        BOTMEM_TABLE.store(if ok { 1 } else { 2 }, Relaxed);
+    }
+    BOTMEM_TABLE.load(Relaxed) == 1
+}
+
+/// `d`: the bot's name (10 bytes) and its memory as hex digits (only those are accepted: they go into the query as they are).
+async fn save_bot_memory(d: Rd<'_>, db: &mut Db) {
+    let (bot, data) = (d.s(0, 10), d.s(10, 16000));
+    if bot.is_empty() || !data.iter().all(|c| c.is_ascii_hexdigit()) || !bot_memory_table(db).await {
+        return;
+    }
+    db.qs(&format!("REPLACE INTO `bot_memory` (`bot`, `data`) VALUES ('{}', '{}');", good(&bot), s(&data))).await;
+}
+
 fn is_db_msg(m: u32) -> bool {
     matches!(
         m,
@@ -2470,6 +2510,8 @@ fn is_db_msg(m: u32) -> bool {
             | MSGID_REQUEST_LGNPTS
             | MSGID_REQUEST_LGNSVC
             | MSGID_SUBCASH
+            | MSGID_REQUEST_BOTMEM
+            | MSGID_BOTMEM_SAVE
     )
 }
 

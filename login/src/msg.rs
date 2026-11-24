@@ -35,6 +35,10 @@ pub const MSGID_RESPONSE_LGNPTS: u32 = 0x0FC94222 + M4;
 pub const MSGID_REQUEST_LGNSVC: u32 = 0x0FC94223 + M4;
 pub const MSGID_RESPONSE_LGNSVC: u32 = 0x0FC94224 + M4;
 pub const MSGID_SUBCASH: u32 = 0x0FC94225 + M4;
+// Rust only (no C++ counterpart): what the in-process bots remember of the players (hg `bots.rs`), kept in the `bot_memory` table
+pub const MSGID_REQUEST_BOTMEM: u32 = 0x0FC94230 + M4;
+pub const MSGID_BOTMEM_SAVE: u32 = 0x0FC94231 + M4;
+pub const MSGID_RESPONSE_BOTMEM: u32 = 0x0FC94232 + M4;
 
 pub const MSGID_ITEMCONFIGURATIONCONTENTS: u32 = 0x0FA314D9 + M4;
 pub const MSGID_NPCCONFIGURATIONCONTENTS: u32 = 0x0FA314DA + M4;

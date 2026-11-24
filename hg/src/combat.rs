@@ -273,8 +273,9 @@ impl Game {
                             f.min_ap_sm = (f.dt_sm + f.ab_sm + d).max(1).min(max_sm);
                             f.min_ap_l = (f.dt_l + f.ab_l + d).max(1).min(max_l);
                         } else if f.custom_attack < 0 {
-                            f.max_ap_sm = (max_sm + d).max(1).max(max_sm);
-                            f.max_ap_l = (max_l + d).max(1).max(max_l);
+                            // fix: the C++ clamped with max(.., base), so a negative custom attack never lowered the maximum
+                            f.max_ap_sm = (max_sm + d).max(1).min(max_sm);
+                            f.max_ap_l = (max_l + d).max(1).min(max_l);
                         }
                     }
                     let t5 = nib(a, 5);
@@ -512,6 +513,24 @@ impl Game {
         }
     }
 
+    /// An attacker that hits stops being invisible (status bit, effect and its release event; no broadcast).
+    fn break_invisibility(&mut self, h: usize, tt: u8) {
+        let Some((m, st)) = self.unit_mut(h, tt) else { return };
+        if *st & STATUS_INVISIBILITY != 0 {
+            *st &= !STATUS_INVISIBILITY;
+            m[MAGICTYPE_INVISIBILITY as usize] = 0;
+            self.remove_delay_events(h, tt, MAGICTYPE_INVISIBILITY);
+        }
+    }
+
+    /// A special ability strips the Protect effect: clears its status bit and effect, returns the old kind (no broadcast).
+    fn clear_protect(&mut self, h: usize, tt: u8) -> i32 {
+        let Some((m, st)) = self.unit_mut(h, tt) else { return 0 };
+        let p = std::mem::take(&mut m[MAGICTYPE_PROTECT as usize]);
+        *st &= !crate::delay::magic_flag(MAGICTYPE_PROTECT, p).unwrap_or(0);
+        p
+    }
+
     /// `CalculateSSN_SkillIndex`
     pub fn calc_ssn_skill(&mut self, h: usize, s: i32, mut v: i32) {
         let Some(c) = self.client_mut(h) else { return };
@@ -573,13 +592,8 @@ impl Game {
                 if !self.maps[c.map_index].is_attack_enabled {
                     return 0;
                 }
-                let c = self.client_mut(ah).unwrap();
-                if c.status & STATUS_INVISIBILITY != 0 {
-                    c.set_status_flag(STATUS_INVISIBILITY, false);
-                    c.magic_effect_status[MAGICTYPE_INVISIBILITY as usize] = 0;
-                    self.remove_delay_events(ah, OWNERTYPE_PLAYER, MAGICTYPE_INVISIBILITY);
-                }
-                let c = self.client(ah).unwrap();
+                self.break_invisibility(ah, OWNERTYPE_PLAYER);
+                let Some(c) = self.client(ah) else { return 0 };
                 if c.appr[1] as u16 & 0xF000 == 0 {
                     return 0;
                 }
@@ -639,13 +653,8 @@ impl Game {
                 if !self.maps[n.map_index].is_attack_enabled {
                     return 0;
                 }
-                let n = self.npcs[ah].as_mut().unwrap();
-                if n.status & STATUS_INVISIBILITY != 0 {
-                    n.status &= !STATUS_INVISIBILITY;
-                    n.magic_effect_status[MAGICTYPE_INVISIBILITY as usize] = 0;
-                    self.remove_delay_events(ah, OWNERTYPE_NPC, MAGICTYPE_INVISIBILITY);
-                }
-                let n = self.npcs[ah].as_ref().unwrap();
+                self.break_invisibility(ah, OWNERTYPE_NPC);
+                let Some(n) = self.npc(ah) else { return 0 };
                 aside = n.side;
                 let (dt, dr) = (n.attack_dice_throw, n.attack_dice_range);
                 (ap_sm, ap_l) = (0, 0);
@@ -653,7 +662,7 @@ impl Game {
                     let d = self.rng.dice(dt, dr);
                     (ap_sm, ap_l) = (d, d);
                 }
-                let n = self.npcs[ah].as_ref().unwrap();
+                let Some(n) = self.npc(ah) else { return 0 };
                 (ahr, adir, berserk, ahp, apos, party) = (n.hit_ratio, n.dir, n.magic_effect_status[MAGICTYPE_BERSERK as usize] != 0, n.hp, (n.x, n.y), 0);
                 asa = n.special_ability;
             }
@@ -979,17 +988,9 @@ impl Game {
                 for (k, _) in strip {
                     self.endu_stripping(th, k);
                 }
-                if asa == 2 && self.client(th).unwrap().magic_effect_status[MAGICTYPE_PROTECT as usize] != 0 {
-                    let p = self.client(th).unwrap().magic_effect_status[MAGICTYPE_PROTECT as usize];
+                if asa == 2 && self.unit_effect(th, OWNERTYPE_PLAYER, MAGICTYPE_PROTECT) != 0 {
+                    let p = self.clear_protect(th, OWNERTYPE_PLAYER);
                     self.notify(th, NOTIFY_MAGICEFFECTOFF, &[MAGICTYPE_PROTECT, p], None);
-                    let t = self.client_mut(th).unwrap();
-                    let flag = match p {
-                        MAGICPROTECT_PFA => STATUS_PFA,
-                        MAGICPROTECT_PFM | MAGICPROTECT_AMP => STATUS_PFM,
-                        _ => STATUS_DEFENSESHIELD,
-                    };
-                    t.set_status_flag(flag, false);
-                    t.magic_effect_status[MAGICTYPE_PROTECT as usize] = 0;
                 }
                 if !self.client(th).unwrap().cs.is_poisoned && matches!(asa, 5 | 6 | 61) && !self.resist_poison(th, OWNERTYPE_PLAYER) {
                     let t = self.client_mut(th).unwrap();
@@ -1062,7 +1063,7 @@ impl Game {
                 }
             }
             _ => {
-                let n = self.npcs[th].as_ref().unwrap();
+                let Some(n) = self.npc(th) else { return 0 };
                 if n.behavior == BEHAVIOR_DEAD || n.is_killed {
                     return 0;
                 }
@@ -1076,7 +1077,7 @@ impl Game {
                         self.gmg_hit(th, aside, ap_l);
                     }
                 }
-                let n = self.npcs[th].as_ref().unwrap();
+                let Some(n) = self.npc(th) else { return 0 };
                 if matches!(n.action_limit, 1 | 2 | 6) {
                     return 0;
                 }
@@ -1085,16 +1086,10 @@ impl Game {
                     let d = dmg as f64;
                     dmg = ((d - d * (n.abs_damage.abs() as f64 / 100.0)) as i32).max(1);
                 }
-                let n = self.npcs[th].as_mut().unwrap();
-                if asa == 2 && n.magic_effect_status[MAGICTYPE_PROTECT as usize] != 0 {
-                    let flag = match n.magic_effect_status[MAGICTYPE_PROTECT as usize] {
-                        MAGICPROTECT_PFA => STATUS_PFA,
-                        MAGICPROTECT_PFM | MAGICPROTECT_AMP => STATUS_PFM,
-                        _ => STATUS_DEFENSESHIELD,
-                    };
-                    n.status &= !flag;
-                    n.magic_effect_status[MAGICTYPE_PROTECT as usize] = 0;
+                if asa == 2 {
+                    self.clear_protect(th, OWNERTYPE_NPC);
                 }
+                let Some(n) = self.npc_mut(th) else { return 0 };
                 if matches!(n.action_limit, 0 | 3 | 5) {
                     n.hp -= dmg;
                 }
@@ -1105,7 +1100,7 @@ impl Game {
                 } else {
                     let skip = (!matches!(n.type_, 21 | 55 | 56) && n.side == aside) || n.action_limit != 0 || n.is_perm_attack_mode || (n.is_summoned && n.summon_control_mode == 1) || n.type_ as i32 == NPC_CP;
                     if !skip && self.rng.dice(1, 3) == 2 {
-                        let n = self.npcs[th].as_ref().unwrap();
+                        let Some(n) = self.npc(th) else { return exp };
                         let switch = if n.behavior == BEHAVIOR_ATTACK {
                             let (tx, ty) = self.unit_pos(n.target, n.target_type).unwrap_or((0, 0));
                             let d1 = (n.x - tx) as i32 * (n.x - tx) as i32 + (n.y - ty) as i32 * (n.y - ty) as i32;
@@ -1115,29 +1110,34 @@ impl Game {
                         } else {
                             true
                         };
-                        if switch {
-                            let n = self.npcs[th].as_mut().unwrap();
+                        if let (true, Some(n)) = (switch, self.npc_mut(th)) {
                             (n.behavior, n.behavior_turn_count, n.target, n.target_type) = (BEHAVIOR_ATTACK, 0, ah, at);
                         }
                     }
                     // gold drop value is never loaded (commented out in the C++ decoder), so this is dice(1, 3)
-                    if self.rng.dice(1, 3) == 1 && self.npcs[th].as_ref().unwrap().action_limit == 0 {
-                        self.npcs[th].as_mut().unwrap().time = now;
+                    if self.rng.dice(1, 3) == 1 {
+                        if let Some(n) = self.npc_mut(th).filter(|n| n.action_limit == 0) {
+                            n.time = now;
+                        }
                     }
-                    let n = self.npcs[th].as_ref().unwrap();
+                    let Some(n) = self.npc(th) else { return exp };
                     if weapon_type < 40 && n.action_limit == 4 {
                         self.npc_damage_move(th, apos, Some((ah, at)));
                     } else {
                         self.send_event_near_npc_v(th, MSGID_EVENT_MOTION, OBJECTDAMAGE as u16, dmg as i16, weapon as i16, 0);
                     }
-                    let n = self.npcs[th].as_ref().unwrap();
+                    // the knock-back above can delete the NPC (energy sphere reaching its goal)
+                    let Some(n) = self.npc(th) else { return exp };
                     let hold = n.magic_effect_status[MAGICTYPE_HOLDOBJECT as usize];
                     if hold == 1 || (hold == 2 && n.hit_dice > 50 && self.rng.dice(1, 10) == 5) {
-                        self.npcs[th].as_mut().unwrap().magic_effect_status[MAGICTYPE_HOLDOBJECT as usize] = 0;
+                        if let Some(n) = self.npc_mut(th) {
+                            n.magic_effect_status[MAGICTYPE_HOLDOBJECT as usize] = 0;
+                        }
                         self.remove_delay_events(th, OWNERTYPE_NPC, MAGICTYPE_HOLDOBJECT);
                     }
-                    let n = self.npcs[th].as_mut().unwrap();
-                    if n.no_die_remain_exp > 0 && !n.is_summoned && at == OWNERTYPE_PLAYER && self.clients[ah].is_some() {
+                    let player_alive = at == OWNERTYPE_PLAYER && self.client(ah).is_some();
+                    let Some(n) = self.npc_mut(th) else { return exp };
+                    if n.no_die_remain_exp > 0 && !n.is_summoned && player_alive {
                         let e = if n.no_die_remain_exp > dmg {
                             n.no_die_remain_exp -= dmg;
                             dmg

@@ -307,6 +307,12 @@ impl Game {
     pub fn client_mut(&mut self, h: usize) -> Option<&mut Client> {
         self.clients.get_mut(h).and_then(|c| c.as_mut())
     }
+    pub fn npc(&self, h: usize) -> Option<&crate::npc::Npc> {
+        self.npcs.get(h).and_then(|n| n.as_ref())
+    }
+    pub fn npc_mut(&mut self, h: usize) -> Option<&mut crate::npc::Npc> {
+        self.npcs.get_mut(h).and_then(|n| n.as_mut())
+    }
     /// Players for the `m_iClientShortCut` loops (ascending handles; the C++ shortcut list is in accept order).
     pub fn handles(&self) -> Vec<usize> {
         (1..MAXCLIENTS_).filter(|&i| self.clients[i].is_some()).collect()
@@ -781,6 +787,15 @@ impl Game {
         tokio::spawn(crate::net::login_socket(self.ls_addr.clone(), i, self.ev.clone()));
     }
 
+    /// A login link that records what the game sends it (the frames, header included), for tests.
+    #[cfg(test)]
+    pub fn test_login_link(&mut self) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.ls[0] = Some(tx);
+        self.ls_available[0] = true;
+        rx
+    }
+
     /// XSOCKEVENT_CONNECTIONESTABLISH
     fn ls_connected(&mut self, i: usize, tx: Tx) {
         self.ls_connecting[i] = false;
@@ -1044,6 +1059,7 @@ impl Game {
             MSGID_RESPONSE_DISBANDGUILD => self.response_disband_guild(d),
             MSGID_RESPONSE_LGNPTS => self.response_legion_pts(d),
             MSGID_RESPONSE_LGNSVC => self.handle_legion_service(d),
+            crate::bots::MSGID_RESPONSE_BOTMEM => self.bots_memory_loaded(d),
             // password checks: later layers
             _ => {}
         }

@@ -523,6 +523,10 @@ release -> NULLACTION, SETTING_SUCCESS 34, NULLACTION (bits cleared).
 
 ## C++ bugs fixed (a `// fix:` comment at each, except the two marked *)
 
+- Negative custom attack (2026-11-24): CalcTotalItemEffect clamped the lowered maximum with `if (Max < base) Max = base`, so an
+  item with a negative custom attack value never lowered the player's maximum damage. Now `min(base)`, like the positive branch
+  (combat.rs, `f.max_ap_sm` / `f.max_ap_l`). Gameplay-visible: such items now do cut the damage cap by up to 5 points at -100.
+
 - Batch D leftovers (2026-11-21, nineteenth session): GetDKItemHandler built the item name from an uninitialised buffer for an
   unknown item number or a sex that is neither MALE nor FEMALE (it logged "Gail asked to create a wrong item!" and went on);
   GetLegionItem did the same for the sex; the Login's handle in MSGID_RESPONSE_LGNPTS / LGNSVC indexed m_pClientList unchecked
