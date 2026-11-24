@@ -944,6 +944,16 @@ fn set_offline(n: usize, until: u64) {
     v[n] = until;
 }
 
+/// When the next bot may start its login (unix ms). The Login answers one at a time and drops what the game does not confirm
+/// in time, so bots that all start at once (the maximum raised from 0, a restart) fail, retry together and fail again.
+static NEXT_LOGIN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long a bot must wait (ms) so that logins start `spread` ms apart; it reserves its slot.
+fn login_wait(next: &std::sync::atomic::AtomicU64, now: u64, spread: u64) -> u64 {
+    let prev = next.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |t| Some(t.max(now) + spread)).unwrap_or(now);
+    prev.max(now) - now
+}
+
 fn offline_until(n: usize) -> u64 {
     OFFLINE.lock().unwrap().get(n).copied().unwrap_or(0)
 }
@@ -1001,7 +1011,6 @@ async fn login(addr: &str, acc: &[u8], ch: &[u8], pwd: &[u8], look: [u8; 5], sta
 
 /// Keeps one bot connected: log in, hand the game a fake connection, wait until the game drops it, try again.
 pub async fn run_bot(n: usize, cfg: Arc<BotCfg>, acc: String, ch: String, ev: net::EvTx) {
-    tokio::time::sleep(Duration::from_millis(cfg.login_spread_ms * n as u64)).await; // spread the logins
     let pwd = cfg.password.as_bytes();
     loop {
         while unix_ms() < offline_until(n) {
@@ -1010,6 +1019,7 @@ pub async fn run_bot(n: usize, cfg: Arc<BotCfg>, acc: String, ch: String, ev: ne
         while !READY.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        tokio::time::sleep(Duration::from_millis(login_wait(&NEXT_LOGIN, unix_ms(), cfg.login_spread_ms))).await; // one login at a time
         if !login(&cfg.login, acc.as_bytes(), ch.as_bytes(), pwd, look_of(n + 1), START_STATS[arch_of(&cfg, n + 1) as usize]).await {
             log(&format!("(bot) {ch}: login refused, retrying"));
             tokio::time::sleep(Duration::from_millis(cfg.relogin_ms)).await;
@@ -3726,6 +3736,15 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logins_start_one_spread_apart_however_many_ask_at_once() {
+        let next = std::sync::atomic::AtomicU64::new(0);
+        let waits: Vec<u64> = (0..4).map(|_| login_wait(&next, 1_000, 500)).collect();
+        assert_eq!(waits, [0, 500, 1000, 1500]);
+        assert_eq!(login_wait(&next, 10_000, 500), 0, "a quiet moment: no wait");
+        assert_eq!(login_wait(&next, 10_000, 500), 500);
+    }
 
     #[test]
     fn aggression_is_spread_from_never_to_always() {
