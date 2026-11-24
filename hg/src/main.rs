@@ -48,6 +48,7 @@ mod apocalypse;
 mod astoria;
 mod scheduler;
 mod events;
+mod stats;
 mod gm;
 mod notice;
 mod energy;
@@ -177,10 +178,11 @@ fn main() {
         let cfg_path = arg(&args, "--bots-cfg").unwrap_or_else(|| "Bots.cfg".into());
         let mut bcfg = match std::fs::read_to_string(&cfg_path) {
             Ok(t) => {
-                let (c, warnings) = bots::BotCfg::parse(&t);
+                let (mut c, warnings) = bots::BotCfg::parse(&t);
                 for w in warnings {
                     log(&format!("(!) {cfg_path}: {w}"));
                 }
+                c.load_names(&cfg_path);
                 c
             }
             Err(_) => bots::BotCfg::default(),
@@ -205,7 +207,7 @@ fn main() {
         let ev_tx = tx.clone();
         let mut g = game::Game::new(cfg, settings, maps, tx, login, seed);
         g.bots = bots;
-        if g.bots.cfg.web_port > 0 && g.bots.cfg.count > 0 {
+        if g.bots.cfg.web_port > 0 {
             let web: bots_web::Web = Default::default();
             tokio::spawn(bots_web::serve(g.bots.cfg.web_port, web.clone()));
             g.bots.web = Some(web);
@@ -219,12 +221,16 @@ fn main() {
                 _ = tick.tick() => {
                     let t = std::time::Instant::now();
                     g.on_timer();
+                    g.stats.tick(t.elapsed());
                     if t.elapsed().as_millis() > 200 {
                         log(&format!("(!) slow tick: {} ms", t.elapsed().as_millis()));
                     }
                 }
                 ev = rx.recv() => match ev {
-                    Some(ev) => g.on_event(ev),
+                    Some(ev) => {
+                        g.stats.events += 1;
+                        g.on_event(ev)
+                    }
                     None => break,
                 },
             }

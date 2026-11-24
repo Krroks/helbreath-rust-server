@@ -51,6 +51,9 @@ pub struct BotCfg {
     pub login: String,
     pub account_prefix: String,
     pub name_prefix: String,
+    /// character names from `BotNames.txt` (bot number n takes line n; the prefix + number when the file is short)
+    pub names: Vec<String>,
+    pub name_set: std::collections::HashSet<Vec<u8>>,
     pub password: String,
     pub login_spread_ms: u64,
     pub relogin_ms: u64,
@@ -121,6 +124,7 @@ pub struct BotCfg {
     pub quests: bool,
     pub guilds: bool,
     pub react: bool,
+    pub pvp: bool,
     pub rich: u32,
     pub gift: bool,
     pub fishing: bool,
@@ -146,6 +150,8 @@ impl Default for BotCfg {
             login: String::new(),
             account_prefix: "bot".into(),
             name_prefix: "Bot".into(),
+            names: Vec::new(),
+            name_set: Default::default(),
             password: "botpw1".into(),
             login_spread_ms: 500,
             relogin_ms: 10_000,
@@ -214,6 +220,7 @@ impl Default for BotCfg {
             quests: true,
             guilds: true,
             react: true,
+            pvp: true,
             rich: 20_000,
             gift: true,
             fishing: true,
@@ -323,6 +330,7 @@ quest-minutes        = 8          // least time between two quests (a quest that
 guilds               = 1          // citizens put points in charisma (the Login asks 20 and level 20 for a guild); the first one ready founds a guild in a town, the
                                   // others of its nation join it (the master approves). They skip the ticket item: the server routine that giving the ticket runs is called
 crusade              = 1          // during a crusade a citizen of level 10 or more takes the fighter duty and raids the enemy more often
+pvp                  = 1          // citizens of rival nations that meet in the open: by its own temper (a quarter never, a quarter always, the rest 15-85 %) a bot attacks the rival it sees; the peaceful ones run
 react                = 1          // when a player hits it, a bot fights back, runs or calls its party, by temper (cautious, steady, bold) and level; party mates come to help
 mp-potion-percent    = 25         // a caster drinks a blue potion below this % of its mana
 shop-mp-target       = 6          // and buys blue potions up to this many (when the shop sells them)
@@ -340,6 +348,27 @@ hunt-level-step      = 6          // it fights monsters of HitDice up to 2 + lev
 
 impl BotCfg {
     /// Parses a `Bots.cfg`; unknown keys and bad values come back as warnings and leave the default.
+    /// A character of the bots: one of the names, or a name with the prefix.
+    pub fn is_bot(&self, name: &[u8]) -> bool {
+        name.starts_with(self.name_prefix.as_bytes()) || self.name_set.contains(name)
+    }
+
+    /// Reads `BotNames.txt` next to the config file: one name per line (letters and digits, 10 at most; others are skipped).
+    pub fn load_names(&mut self, cfg_path: &str) {
+        let path = std::path::Path::new(cfg_path).with_file_name("BotNames.txt");
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        for l in text.lines().map(str::trim) {
+            let ok = !l.is_empty() && l.len() <= 10 && l.bytes().all(|b| b.is_ascii_alphanumeric()) && !self.name_set.contains(l.as_bytes());
+            if ok {
+                self.names.push(l.to_string());
+                self.name_set.insert(l.as_bytes().to_vec());
+            } else if !l.is_empty() && !l.starts_with("//") {
+                log(&format!("(!) {}: name {l:?} skipped (10 letters/digits at most, no repeats)", path.display()));
+            }
+        }
+        log(&format!("(*) {} bot names read from {}", self.names.len(), path.display()));
+    }
+
     pub fn parse(text: &str) -> (BotCfg, Vec<String>) {
         let mut c = BotCfg::default();
         let mut warn = Vec::new();
@@ -361,7 +390,7 @@ impl BotCfg {
             };
             let mut ok = true;
             match (k, num) {
-                ("bot-count", Some(x)) => c.count = x.clamp(0, 99) as usize,
+                ("bot-count", Some(x)) => c.count = x.clamp(0, crate::bots_web::MAX_BOTS as i64) as usize,
                 ("bot-login-spread-ms", Some(x)) => c.login_spread_ms = x.max(0) as u64,
                 ("bot-relogin-ms", Some(x)) => c.relogin_ms = x.max(0) as u64,
                 ("think-ms", Some(x)) => c.think_ms = x.clamp(20, 5000) as u32,
@@ -424,6 +453,7 @@ impl BotCfg {
                     }
                 }
                 ("react", _) if flag.is_some() => c.react = flag.unwrap(),
+                ("pvp", _) if flag.is_some() => c.pvp = flag.unwrap(),
                 ("mp-potion-percent", Some(x)) => c.mp_potion_pct = x.clamp(0, 90) as i32,
                 ("shop-mp-target", Some(x)) => c.shop_mp_target = x.clamp(0, 50) as u32,
                 ("buff", _) if flag.is_some() => c.buff = flag.unwrap(),
@@ -682,6 +712,9 @@ pub struct Bot {
     last_buff: u32,
     /// 0 cautious, 1 steady, 2 bold: how it takes being attacked (and more, see `tune`)
     temper: u8,
+    /// percent chance that it attacks a rival citizen it meets (`pvp`): 0 never (it runs), 100 always
+    aggro: u8,
+    last_enc: u32,
     flee_until: u32,
     flee_foe: usize,
     last_react: u32,
@@ -783,7 +816,7 @@ impl Bot {
     /// Bot number `i` (1-based) of `cfg`: its names, class and pace (the pace is a slot of 0..100 spread by a
     /// multiplicative hash that the mix cuts), then +-15 % on each timing.
     fn made(cfg: &BotCfg, i: usize) -> Bot {
-        let mut b = Bot { acc: format!("{}{i:02}", cfg.account_prefix), ch: format!("{}{i:02}", cfg.name_prefix), n: i - 1, ..Default::default() };
+        let mut b = Bot { acc: format!("{}{i:02}", cfg.account_prefix), ch: cfg.names.get(i - 1).cloned().unwrap_or_else(|| format!("{}{i:02}", cfg.name_prefix)), n: i - 1, ..Default::default() };
         b.tune(cfg);
         b
     }
@@ -799,6 +832,9 @@ impl Bot {
         self.arch = arch_of(cfg, i);
         self.hobby = (((((i as u32).wrapping_mul(2_246_822_519) ^ 0x27d4_eb2f).wrapping_mul(2_654_435_761)) >> 9) % 100 < 34) as u8;
         self.temper = (((i as u32).wrapping_mul(2_654_435_761) ^ 0x5bd1_e995).wrapping_mul(2_246_822_519) >> 13) as u8 % 3;
+        // a quarter never fight rivals, a quarter always do, the rest somewhere between
+        let a = (((i as u32).wrapping_mul(2_246_822_519) ^ 0x1b87_3593).wrapping_mul(2_654_435_761) >> 11) % 100;
+        self.aggro = match a { 0..=24 => 0, 25..=49 => 100, _ => (15 + (a - 50) * 70 / 49) as u8 };
         self.pace = pace;
         self.step_ms = ((cfg.step_ms as f32 * p.step * j(3)) as u32).max(MIN_STEP_MS);
         self.attack_ms = ((cfg.attack_ms as f32 * p.attack * j(5)) as u32).max(MIN_ATTACK_MS);
@@ -814,6 +850,30 @@ impl Bots {
         let list = (1..=cfg.count).map(|i| Bot::made(&cfg, i)).collect();
         Bots { list, cfg: Arc::new(cfg), ..Default::default() }
     }
+}
+
+/// `text` (Bots.cfg) with its `bot-count` line set to `n` (the comment of the line is kept; appended when there is none).
+fn with_count(text: &str, n: usize) -> String {
+    let mut done = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let is_count = l.trim_start().strip_prefix("bot-count").is_some_and(|r| r.trim_start().starts_with('='));
+            if !done && is_count {
+                done = true;
+                let tail = l.find("//").or_else(|| l.find('#')).map(|i| format!("   {}", &l[i..])).unwrap_or_default();
+                format!("bot-count            = {n}{tail}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !done {
+        out.push(format!("bot-count = {n}"));
+    }
+    out.join("
+") + "
+"
 }
 
 // ------------------------------------------------------------------ chat
@@ -1255,6 +1315,11 @@ impl Game {
         let now = self.now();
         let think = self.bots.cfg.think_ms;
         self.bots.peace.retain(|(_, t)| now.wrapping_sub(*t) as i32 <= 0);
+        // the page asked for another maximum of connected bots
+        let asked = self.bots.web.as_ref().and_then(|w| w.lock().unwrap().set_max.take());
+        if let Some(n) = asked {
+            self.bots_set_max(n, now);
+        }
         if now.wrapping_sub(self.bots.next_reload) as i32 >= 0 {
             self.bots.next_reload = now.wrapping_add(5000);
             self.bots_reload();
@@ -1288,8 +1353,8 @@ impl Game {
         if self.bots.list.is_empty() || !self.bots.cfg.react {
             return;
         }
-        let prefix = self.bots.cfg.name_prefix.as_bytes().to_vec();
-        let named = |g: &Game, h: usize| g.clients[h].as_ref().is_some_and(|c| crate::util::cstr(&c.char_name).starts_with(&prefix));
+        let cfg = Arc::clone(&self.bots.cfg);
+        let named = |g: &Game, h: usize| g.clients[h].as_ref().is_some_and(|c| cfg.is_bot(crate::util::cstr(&c.char_name)));
         if !named(self, victim) || named(self, attacker) {
             return;
         }
@@ -1400,6 +1465,40 @@ impl Game {
         fight
     }
 
+    /// Rival citizens meeting in the open (`pvp`): by its `aggro` a bot attacks the rival it sees (`Mode::Defend` on that player,
+    /// like a bot that fights back); a peaceful one (0) runs from it; the others look away from that one for a minute.
+    fn bot_encounter(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), hp: (i32, i32), now: u32) -> bool {
+        if !cfg.pvp || !matches!(b.mode, Mode::Hunt | Mode::Travel | Mode::Quest) || now.wrapping_sub(b.last_enc) < 1500 {
+            return false;
+        }
+        b.last_enc = now;
+        let (pos, m) = at;
+        let Some(c) = self.clients[h].as_ref() else { return false };
+        if c.is_neutral() || !self.maps[m].is_attack_enabled {
+            return false;
+        }
+        let enemy = if c.side == ARESDEN { ELVINE } else { ARESDEN };
+        b.raid_ignore.retain(|&(_, t)| now.wrapping_sub(t) as i32 <= 0);
+        let seen = self.handles().into_iter().filter(|&j| j != h && !b.raid_ignore.iter().any(|&(i, _)| i == j)).filter_map(|j| self.foe_pos(j, m, enemy, false).map(|t| (cheb(pos, t), j, t))).filter(|&(d, ..)| d <= b.sight).min_by_key(|&(d, j, _)| (d, j));
+        let Some((d, foe, fpos)) = seen else { return false };
+        if hp.0 * 100 >= hp.1 * 60 && (b.aggro >= 100 || self.dice(1, 100) <= b.aggro as _) {
+            log(&format!("(bot) {}: meets a rival citizen (player {foe}) and attacks", b.ch));
+            (b.mode, b.raid_map, b.raid_target, b.raid_start, b.attacks, b.target, b.no_route_logged) = (Mode::Defend, m, foe, now, 0, 0, false);
+            b.raid_ignore.clear();
+            b.path.clear();
+            return true;
+        }
+        if b.aggro == 0 && cfg.react && d <= 8 {
+            (b.flee_until, b.flee_foe, b.target) = (now.wrapping_add(8000), foe, 0);
+            b.path.clear();
+            return self.bot_flee(h, b, cfg, at, fpos, now);
+        }
+        if b.aggro > 0 {
+            b.raid_ignore.push((foe, now.wrapping_add(60_000)));
+        }
+        false
+    }
+
     /// Called by the chat handler for each client that receives a line (`mode` 0 normal, 20 whisper): a bot that was greeted,
     /// named or whispered to by a player queues an answer, a few seconds later as a person types it.
     pub fn bots_hear(&mut self, speaker: usize, listener: usize, mode: u8, d: &[u8]) {
@@ -1407,9 +1506,9 @@ impl Game {
             return;
         }
         let (Some(sp), Some(li)) = (self.client(speaker), self.client(listener)) else { return };
-        let prefix = self.bots.cfg.name_prefix.as_bytes();
+        let cfg = &self.bots.cfg;
         let (sname, lname) = (crate::util::cstr(&sp.char_name), crate::util::cstr(&li.char_name));
-        if sname.starts_with(prefix) || !lname.starts_with(prefix) {
+        if cfg.is_bot(sname) || !cfg.is_bot(lname) {
             return; // bots do not talk to bots
         }
         let (sname, lname) = (String::from_utf8_lossy(sname).to_string(), String::from_utf8_lossy(lname).to_string());
@@ -1527,7 +1626,7 @@ impl Game {
         let near = self.handles().into_iter().filter(|&j| j != h).find_map(|j| {
             let o = self.clients[j].as_ref()?;
             let name = String::from_utf8_lossy(crate::util::cstr(&o.char_name)).to_string();
-            (o.map_index == m && !o.is_killed && cheb(pos, (o.x, o.y)) <= 6 && !name.starts_with(&cfg.name_prefix) && !b.greeted.iter().any(|(g, _)| *g == name)).then_some(name)
+            (o.map_index == m && !o.is_killed && cheb(pos, (o.x, o.y)) <= 6 && !cfg.is_bot(name.as_bytes()) && !b.greeted.iter().any(|(g, _)| *g == name)).then_some(name)
         });
         if let Some(name) = near {
             b.greeted.push((name, now));
@@ -1632,7 +1731,7 @@ impl Game {
             }
         }
         let chat: Vec<String> = self.bots.chat_log.iter().rev().take(150).rev().map(|l| format!("{{\"t\":{},\"map\":{},\"from\":{},\"to\":{},\"text\":{},\"bot\":{}}}", l.t, json_str(&l.map), json_str(&l.from), json_str(&l.to), json_str(&l.text), l.bot)).collect();
-        let body = format!("{{\"t\":{t},\"paused\":{},\"bots\":[{}],\"maps\":[{}],\"chat\":[{}]}}", self.bots.paused || self.bots.cfg.paused, rows.join(","), maps.join(","), chat.join(","));
+        let body = format!("{{\"t\":{t},\"paused\":{},\"bots\":[{}],\"maps\":[{}],\"chat\":[{}],\"max\":{},\"cap\":{}}}", self.bots.paused || self.bots.cfg.paused, rows.join(","), maps.join(","), chat.join(","), self.bots.cfg.count, crate::bots_web::MAX_BOTS);
         let mut w = web.lock().unwrap();
         w.bots = body;
         w.maps.extend(made);
@@ -1662,6 +1761,7 @@ impl Game {
         let old = Arc::clone(&self.bots.cfg);
         // what the running tasks were started with does not change
         (cfg.login, cfg.account_prefix, cfg.name_prefix, cfg.password, cfg.login_spread_ms, cfg.relogin_ms) = (old.login.clone(), old.account_prefix.clone(), old.name_prefix.clone(), old.password.clone(), old.login_spread_ms, old.relogin_ms);
+        (cfg.names, cfg.name_set) = (old.names.clone(), old.name_set.clone());
         let cfg = Arc::new(cfg);
         for b in self.bots.list.iter_mut() {
             b.tune(&cfg);
@@ -1719,6 +1819,24 @@ impl Game {
     }
 
     /// The console: `bots status | pause | resume | count N | reload`.
+    /// The page (or the console) sets the maximum of connected bots: `bot-count` of Bots.cfg is rewritten (it survives a restart) and
+    /// the file is read again at once, which logs off the bots above the new number or starts the missing ones.
+    pub fn bots_set_max(&mut self, n: usize, now: u32) {
+        let path = self.bots.cfg_path.clone();
+        let n = n.min(crate::bots_web::MAX_BOTS);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            log(&format!("(!) bots: cannot read {path:?}, the maximum stays"));
+            return;
+        };
+        if let Err(e) = std::fs::write(&path, with_count(&text, n)) {
+            log(&format!("(!) bots: cannot write {path}: {e}; the maximum stays"));
+            return;
+        }
+        log(&format!("(*) bots: maximum connected set to {n}"));
+        self.bots.cfg_mtime = Some(std::time::UNIX_EPOCH); // the reload below reads the new file
+        self.bots.next_reload = now.wrapping_sub(1);
+    }
+
     pub fn bots_command(&mut self, args: &str) {
         let mut t = args.split_whitespace();
         match (t.next(), t.next().and_then(|n| n.parse::<usize>().ok())) {
@@ -1727,11 +1845,8 @@ impl Game {
             (Some("resume"), _) => (self.bots.paused, ) = (false, ),
             (Some("reload"), _) => self.bots.cfg_mtime = Some(std::time::UNIX_EPOCH),
             (Some("count"), Some(n)) => {
-                let mut cfg = (*self.bots.cfg).clone();
-                cfg.count = n;
-                self.bots.cfg = Arc::new(cfg);
-                self.bots.cfg_mtime = Some(std::time::UNIX_EPOCH); // the reload adds the bots
-                log(&format!("(*) bots: count {n} (Bots.cfg is read again; edit it too or the file wins)"));
+                let now = self.now();
+                self.bots_set_max(n, now);
             }
             _ => log("(!) bots: status | pause | resume | count N | reload"),
         }
@@ -1846,7 +1961,7 @@ impl Game {
             b.path.clear();
             return;
         }
-        if self.bot_react(h, b, &cfg, (pos, m), (hp, max_hp), now) {
+        if self.bot_react(h, b, &cfg, (pos, m), (hp, max_hp), now) || self.bot_encounter(h, b, &cfg, (pos, m), (hp, max_hp), now) {
             return;
         }
         match b.mode {
@@ -1960,7 +2075,7 @@ impl Game {
         }
         let Some(c) = self.clients[h].as_ref() else { return };
         if c.req_join_party_h != 0 && c.party_status != PARTYSTATUS_PROCESSING {
-            if now.wrapping_sub(b.last_accept) > 1500 && crate::util::cstr(&c.req_join_party_name).starts_with(cfg.name_prefix.as_bytes()) {
+            if now.wrapping_sub(b.last_accept) > 1500 && cfg.is_bot(crate::util::cstr(&c.req_join_party_name)) {
                 let from = String::from_utf8_lossy(crate::util::cstr(&c.req_join_party_name)).to_string();
                 b.accepts = if now.wrapping_sub(b.last_accept) < 6000 && b.accepts.1 == from { (b.accepts.0 + 1, from.clone()) } else { (1, from.clone()) };
                 b.last_accept = now;
@@ -1973,9 +2088,8 @@ impl Game {
         }
         if c.party_id != 0 && now.wrapping_sub(b.last_friend_look) > 20_000 {
             b.last_friend_look = now;
-            let prefix = cfg.name_prefix.as_bytes();
             for j in self.party_members(c.party_id).into_iter().filter(|&j| j != h) {
-                let name = self.clients[j].as_ref().filter(|o| crate::util::cstr(&o.char_name).starts_with(prefix)).map(|o| String::from_utf8_lossy(crate::util::cstr(&o.char_name)).to_string());
+                let name = self.clients[j].as_ref().filter(|o| cfg.is_bot(crate::util::cstr(&o.char_name))).map(|o| String::from_utf8_lossy(crate::util::cstr(&o.char_name)).to_string());
                 if let Some(n) = name.and_then(|n| self.bots.list.iter().position(|x| x.ch == n)) {
                     b.friends.retain(|&f| f != n);
                     b.friends.push(n);
@@ -2012,7 +2126,7 @@ impl Game {
             let d = cheb(pos, (o.x, o.y));
             let free = o.party_status == PARTYSTATUS_NULL && o.party_id == 0;
             let room = o.party_status == PARTYSTATUS_CONFIRM && self.party_members(o.party_id).len() < MAXPARTYMEMBERS as usize;
-            let bot = j != h && crate::util::cstr(&o.char_name).starts_with(cfg.name_prefix.as_bytes());
+            let bot = j != h && cfg.is_bot(crate::util::cstr(&o.char_name));
             if bot && o.map_index == m && o.side == side && !o.is_killed && d <= cfg.party_range && (room || (free && h < j)) {
                 let name = String::from_utf8_lossy(crate::util::cstr(&o.char_name)).to_string();
                 let friend = self.bots.list.iter().position(|x| x.ch == name).is_some_and(|n| b.friends.contains(&n));
@@ -2038,8 +2152,7 @@ impl Game {
         }
         let (pos, side, rank, level, chr, in_town, me) = ((c.x, c.y), c.side, c.guild_rank, c.level, c.range, c.is_on_town_nonpk, Game::pad10(&c.char_name));
         b.last_guild = now;
-        let prefix = cfg.name_prefix.as_bytes();
-        let is_bot = |g: &Game, j: usize| g.clients[j].as_ref().is_some_and(|o| crate::util::cstr(&o.char_name).starts_with(prefix));
+        let is_bot = |g: &Game, j: usize| g.clients[j].as_ref().is_some_and(|o| cfg.is_bot(crate::util::cstr(&o.char_name)));
         if cfg.crusade && self.cr.mode && level >= 10 && c.crusade_duty == 0 {
             log(&format!("(bot) {}: a crusade is on: takes the fighter duty", b.ch));
             self.bot_send(h, common(COMMONTYPE_REQUEST_SELECTCRUSADEDUTY, pos, 1));
@@ -2092,8 +2205,8 @@ impl Game {
         if pid == 0 {
             return None;
         }
-        let prefix = self.bots.cfg.name_prefix.as_bytes();
-        let leader = self.party_members(pid).into_iter().filter(|&j| self.clients[j].as_ref().is_some_and(|o| crate::util::cstr(&o.char_name).starts_with(prefix))).min()?;
+        let cfg = &self.bots.cfg;
+        let leader = self.party_members(pid).into_iter().filter(|&j| self.clients[j].as_ref().is_some_and(|o| cfg.is_bot(crate::util::cstr(&o.char_name)))).min()?;
         (leader != h).then_some(leader)
     }
 
@@ -2902,9 +3015,8 @@ impl Game {
         let (pos, m, party) = ((c.x, c.y), c.map_index, c.party_id);
         let (slot, gold) = self.item_count(h, b"Gold");
         let Some(slot) = slot.filter(|_| gold >= 8000 && party != 0) else { return false };
-        let prefix = cfg.name_prefix.as_bytes();
         let mate = self.party_members(party).into_iter().filter(|&j| j != h).find(|&j| {
-            self.clients[j].as_ref().is_some_and(|o| crate::util::cstr(&o.char_name).starts_with(prefix) && o.map_index == m && !o.is_killed && cheb(pos, (o.x, o.y)) <= 3) && self.item_count(j, b"Gold").1 < 800
+            self.clients[j].as_ref().is_some_and(|o| cfg.is_bot(crate::util::cstr(&o.char_name)) && o.map_index == m && !o.is_killed && cheb(pos, (o.x, o.y)) <= 3) && self.item_count(j, b"Gold").1 < 800
         });
         let Some(j) = mate else { return false };
         b.last_gift = now;
@@ -3616,6 +3728,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aggression_is_spread_from_never_to_always() {
+        let cfg = BotCfg::default();
+        let a: Vec<u8> = (1..=50).map(|i| Bot::made(&cfg, i).aggro).collect();
+        assert!(a.iter().filter(|&&x| x == 0).count() >= 5 && a.iter().filter(|&&x| x == 100).count() >= 5, "{a:?}");
+        assert!(a.iter().any(|&x| (15..=85).contains(&x)) && a.iter().all(|&x| x <= 100));
+    }
+
+    #[test]
     fn path_goes_around_a_wall() {
         // a wall at x = 5 from y = -3 to 3, open elsewhere: the route from (0, 0) to next to (10, 0) must bend
         let walk = |x: i16, y: i16| !(x == 5 && (-3..=3).contains(&y));
@@ -4225,6 +4345,62 @@ mod tests {
         g.bots.list[1].mode = Mode::Fish;
         let line = g.bots_summary();
         assert!(line.contains("defending 1") && line.contains("fishing 0") && line.contains("connected"), "{line}");
+    }
+
+    #[test]
+    fn the_maximum_of_the_page_rewrites_bots_cfg_and_takes_effect_at_once() {
+        assert_eq!(with_count("a = 1
+bot-count   =  50   // how many
+b = 2
+", 7), "a = 1
+bot-count            = 7   // how many
+b = 2
+", "the comment stays");
+        assert_eq!(with_count("a = 1", 3), "a = 1
+bot-count = 3
+", "appended when missing");
+        assert_eq!(with_count("# bot-count = 9
+bot-countx = 1
+", 4), "# bot-count = 9
+bot-countx = 1
+bot-count = 4
+", "a comment or another key is not the line");
+        let dir = std::env::temp_dir().join(format!("hb-bots-max-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Bots.cfg");
+        std::fs::write(&file, "bot-count = 3
+bot-login-address = 127.0.0.1:4000
+").unwrap();
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        let (cfg, _) = BotCfg::parse(&std::fs::read_to_string(&file).unwrap());
+        g.bots = Bots::new(cfg);
+        g.bots.cfg_path = file.to_string_lossy().to_string();
+        g.bots.cfg_mtime = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+        let web: crate::bots_web::Web = Default::default();
+        g.bots.web = Some(web.clone());
+        assert_eq!(g.bots.cfg.count, 3);
+        // the page asks for 5: the next turn of the bots writes the file and reads it again
+        web.lock().unwrap().set_max = Some(5);
+        g.bots_process();
+        assert!(std::fs::read_to_string(&file).unwrap().contains("bot-count            = 5"), "written");
+        assert_eq!(g.bots.cfg.count, 5, "and applied in the same turn");
+        assert!(web.lock().unwrap().set_max.is_none(), "taken");
+        // the published JSON says what the maximum is
+        g.bots.next_publish = 0;
+        g.bots_publish(g.now());
+        assert!(web.lock().unwrap().bots.contains("\"max\":5,\"cap\":200"));
+        // lowering is the same; a number over the cap is capped
+        web.lock().unwrap().set_max = Some(1);
+        g.bots_process();
+        assert_eq!(g.bots.cfg.count, 1);
+        g.bots_set_max(100_000, g.now());
+        g.bots_process();
+        assert_eq!(g.bots.cfg.count, crate::bots_web::MAX_BOTS);
+        // an unreadable file leaves everything as it was
+        g.bots.cfg_path = dir.join("nothing-here.cfg").to_string_lossy().to_string();
+        g.bots_set_max(9, g.now());
+        assert_eq!(g.bots.cfg.count, crate::bots_web::MAX_BOTS);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

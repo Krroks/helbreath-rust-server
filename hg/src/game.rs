@@ -120,6 +120,8 @@ pub struct Game {
     /// Schedule.cfg's events (scheduler.rs)
     pub schedules: Vec<crate::scheduler::Schedule>,
     pub events: crate::events::Events,
+    /// health numbers for /stats (stats.rs)
+    pub stats: crate::stats::Stats,
     /// notice.txt (NoticeHandler): the messages, the last send time and the last index
     pub notices: Vec<Vec<u8>>,
     pub fz: crate::fightzone::FightZones,
@@ -241,6 +243,7 @@ impl Game {
             ast: Default::default(),
             schedules: Vec::new(),
             events: Default::default(),
+            stats: Default::default(),
             notices: Vec::new(),
             fz: Default::default(),
             notice_time: 0,
@@ -283,7 +286,16 @@ impl Game {
     pub fn send_key(&self, h: usize, body: &[u8], key: u8) {
         if let Some(c) = self.clients.get(h).and_then(|c| c.as_ref()) {
             let _ = c.tx.send(proto::encode(key, body));
+            crate::stats::count_out(body.len() + 3);
         }
+    }
+    /// (events waiting in the channel from the sockets, its capacity), for /stats
+    pub fn ev_load(&self) -> (usize, usize) {
+        (self.ev.max_capacity() - self.ev.capacity(), self.ev.max_capacity())
+    }
+    /// Login sockets that are up, for /stats
+    pub fn ls_links(&self) -> usize {
+        self.ls_active_count
     }
     pub fn send(&self, h: usize, body: &[u8]) {
         self.send_key(h, body, 0);
@@ -373,6 +385,7 @@ impl Game {
     /// `OnTimer`
     pub fn on_timer(&mut self) {
         let now = self.now();
+        self.stats_publish();
         if now.wrapping_sub(self.t1) > 300 {
             self.npc_process();
             self.t1 = now;
@@ -665,6 +678,7 @@ impl Game {
                         return;
                     }
                     self.client_mut(h).unwrap().connection_check += 1;
+                    self.stats.msgs += 1;
                     self.client_msg(h, m.key, &m.body);
                 }
                 From::Login => self.login_msg(&m.body),

@@ -11,11 +11,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Default)]
 pub struct Shared {
+    /// the maximum of connected bots the page asked for, until the game loop takes it (`Game::bots_set_max`)
+    pub set_max: Option<usize>,
     /// the `/api/bots` body
     pub bots: String,
+    /// the `/api/stats` body (stats.rs)
+    pub stats: String,
     /// map name -> the `/api/map/<name>` body
     pub maps: HashMap<String, String>,
 }
+
+/// The most bots the page may ask for.
+pub const MAX_BOTS: usize = 200;
 
 pub type Web = Arc<Mutex<Shared>>;
 
@@ -51,12 +58,38 @@ fn reply(status: &str, ctype: &str, body: &str) -> Vec<u8> {
     format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
 }
 
+/// `POST /api/max` with `{"max": N}` (or just N): the page sets the maximum of connected bots. The `X-Bots: 1` header is
+/// required: a page of another site cannot send it without a preflight that nobody answers.
+fn post(path: &str, marked: bool, body: &str, web: &Web) -> Vec<u8> {
+    let json = "application/json; charset=utf-8";
+    if path != "/api/max" {
+        return reply("404 Not Found", json, "{\"error\":\"not found\"}");
+    }
+    if !marked {
+        return reply("403 Forbidden", json, "{\"error\":\"missing X-Bots header\"}");
+    }
+    let digits: String = body.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+    let Some(n) = digits.parse::<usize>().ok().filter(|_| !digits.is_empty() && digits.len() <= 6) else {
+        return reply("400 Bad Request", json, "{\"error\":\"a number is expected\"}");
+    };
+    let n = n.min(MAX_BOTS);
+    web.lock().unwrap().set_max = Some(n);
+    reply("200 OK", json, &format!("{{\"ok\":true,\"max\":{n}}}"))
+}
+
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim()))
+}
+
 /// The answer to one request line's path.
 fn route(path: &str, web: &Web) -> Vec<u8> {
     let w = web.lock().unwrap();
     let json = "application/json; charset=utf-8";
     if path == "/api/bots" {
         return reply("200 OK", json, if w.bots.is_empty() { "{\"bots\":[],\"maps\":[],\"chat\":[]}" } else { &w.bots });
+    }
+    if path == "/api/stats" {
+        return reply("200 OK", json, if w.stats.is_empty() { "{\"error\":\"no snapshot yet\"}" } else { &w.stats });
     }
     if let Some(name) = path.strip_prefix("/api/map/") {
         return match w.maps.get(name) {
@@ -80,23 +113,33 @@ pub async fn serve(port: u16, web: Web) {
         let Ok((mut s, _)) = l.accept().await else { continue };
         let web = Arc::clone(&web);
         tokio::spawn(async move {
-            let mut buf = [0u8; 2048];
+            let mut buf = [0u8; 4096];
             let mut n = 0;
-            // the request line is all that matters: read until the end of the headers or the buffer is full
+            // read the headers, and for a POST the body they announce (a small one)
+            let mut body_at = None;
             while n < buf.len() {
                 match tokio::time::timeout(std::time::Duration::from_secs(3), s.read(&mut buf[n..])).await {
                     Ok(Ok(k)) if k > 0 => n += k,
                     _ => break,
                 }
-                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
+                if body_at.is_none() {
+                    body_at = buf[..n].windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                }
+                if let Some(e) = body_at {
+                    let len = header(&String::from_utf8_lossy(&buf[..e]), "content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+                    if n >= e + len.min(buf.len() - e) {
+                        break;
+                    }
                 }
             }
-            let head = String::from_utf8_lossy(&buf[..n]);
+            let e = body_at.unwrap_or(n);
+            let head = String::from_utf8_lossy(&buf[..e]).to_string();
+            let body = String::from_utf8_lossy(&buf[e..n]).to_string();
             let mut it = head.lines().next().unwrap_or("").split_whitespace();
             let out = match (it.next(), it.next()) {
                 (Some("GET"), Some(p)) => route(p.split('?').next().unwrap_or(p), &web),
-                _ => reply("405 Method Not Allowed", "text/plain", "GET only"),
+                (Some("POST"), Some(p)) => post(p.split('?').next().unwrap_or(p), header(&head, "x-bots") == Some("1"), &body, &web),
+                _ => reply("405 Method Not Allowed", "text/plain", "GET or POST only"),
             };
             let _ = s.write_all(&out).await;
         });
@@ -115,6 +158,20 @@ mod tests {
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
         assert_eq!(json_str("a\"b\\c\nd"), "\"a\\\"b\\\\c\\u000ad\"");
+    }
+
+    #[test]
+    fn the_page_sets_the_maximum_with_a_marked_post_only() {
+        let web: Web = Default::default();
+        let s = |marked: bool, body: &str| String::from_utf8(post("/api/max", marked, body, &web)).unwrap();
+        assert!(s(false, "{\"max\":5}").starts_with("HTTP/1.1 403"), "no X-Bots header: refused");
+        assert!(web.lock().unwrap().set_max.is_none());
+        assert!(s(true, "nothing").starts_with("HTTP/1.1 400") && s(true, "").starts_with("HTTP/1.1 400") && s(true, "99999999999").starts_with("HTTP/1.1 400"));
+        assert!(s(true, "{\"max\": 37}").ends_with("{\"ok\":true,\"max\":37}"));
+        assert_eq!(web.lock().unwrap().set_max, Some(37));
+        assert!(s(true, "5000").ends_with(&format!("\"max\":{MAX_BOTS}}}")), "capped");
+        assert!(String::from_utf8(post("/api/other", true, "1", &web)).unwrap().starts_with("HTTP/1.1 404"));
+        assert_eq!(header("POST /x HTTP/1.1\r\nContent-Length: 12\r\nX-Bots: 1\r\n\r\n", "x-bots"), Some("1"));
     }
 
     #[test]

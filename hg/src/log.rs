@@ -49,7 +49,9 @@ fn queue() -> &'static SyncSender<Msg> {
 
 pub fn log(msg: &str) {
     let t = Local::now();
-    let _ = queue().try_send(Msg::Out(format!("[{:02}:{:02}:{:02}] {msg}", t.hour(), t.minute(), t.second())));
+    if queue().try_send(Msg::Out(format!("[{:02}:{:02}:{:02}] {msg}", t.hour(), t.minute(), t.second()))).is_err() {
+        crate::stats::LOG_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // shown by /stats
+    }
 }
 
 pub fn log_file(msg: &str) {

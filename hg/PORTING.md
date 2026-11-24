@@ -210,6 +210,17 @@ client has and the 3.82-based one lacked. The original client never sends them, 
 
 - **Mobs**: Scarecrow (type 92) and Princess (type 102) sprites loaded from the v8.00 paks (client only, no server change).
 
+## Health page `/stats` (Rust only, `stats.rs`)
+
+Every 2 s the game loop (top of `on_timer`) builds a JSON snapshot into `bots_web::Shared::stats`; the same 127.0.0.1 listener as the bots page
+(`web-port` in Bots.cfg, now started even with 0 bots) serves it at `GET /api/stats`, and `Client/Web/tools/serve.mjs` serves the page
+`http://127.0.0.1:8080/stats` (stats.html) with `/stats/api/stats` (proxy to hg, 1.5 s timeout) and `/stats/api/bridge` (TCP connect to the
+bridge). Shown: verdict (ok / warn / bad with the reasons: Login registration and sockets, a tick over 100 / 200 ms or a loop pause over
+300 / 1000 ms in the last minute, event queue fill, client messages waiting, dropped log lines), uptime, players and bots, tick time and rate,
+queues, network rates, NPCs and ground items, events, per-map activity, the online players and the last 20 problems (slow ticks). The page
+counts a snapshot older than 8 s as a stuck game loop. The Login is not probed on its client port (it would count as a player): hg's own
+registration state says whether it is up. Tests: `stats::tests`. Needs hg and serve.mjs restarted.
+
 ## TODO: v8.00 (Apocalypse) features not done (2026-11-23)
 
 Sources used: Helbreath Olympia wiki (helbreath.net/wiki: Spells, Talents, Rare_Items, Armor, Weapons, Dark_Knight_Mage_and_Hero_Items),
