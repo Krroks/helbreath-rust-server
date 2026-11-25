@@ -87,6 +87,7 @@ pub struct Game {
     t4: u32,
     t5: u32,
     t6: u32,
+    t_hud: u32,
     fish_time: u32,
     whether_time: u32,
     sector_time: u32,
@@ -221,6 +222,7 @@ impl Game {
             t4: 0,
             t5: 0,
             t6: 0,
+            t_hud: 0,
             fish_time: 0,
             whether_time: 0,
             sector_time: 0,
@@ -349,6 +351,7 @@ impl Game {
                 Ev::LsRead { i, body } => format!("ls read {i} {:08x}", Rd::new(body).u32(0)),
                 Ev::LsDown { i } => format!("ls down {i}"),
                 Ev::Stdin(l) => format!("stdin {l}"),
+                Ev::BotLlm { n, .. } => format!("bot llm {n}"),
             };
             log(&format!("ev {what}"));
         }
@@ -376,6 +379,7 @@ impl Game {
             Ev::LsUp { i, tx } => self.ls_connected(i, tx),
             Ev::LsRead { body, .. } => self.queue.push_back(Msg { from: From::Login, key: 0, body }),
             Ev::LsDown { i } => self.ls_down(i),
+            Ev::BotLlm { n, to, with, text, tone, act, note } => self.bots_llm_said(n, to, with, text, tone, act, note),
             Ev::Stdin(line) => match line.trim() {
                 // F1+F4 in the C++ window
                 "shutdown" => self.local_shutdown(),
@@ -441,6 +445,10 @@ impl Game {
             self.fz_age_disconnects();
             self.t3 = now;
             self.confirmed_ips.retain(|c| now.wrapping_sub(c.time) <= 30_000);
+        }
+        if now.wrapping_sub(self.t_hud) > 300 {
+            self.party_hud_flush();
+            self.t_hud = now;
         }
         if now.wrapping_sub(self.t4) > 600 {
             self.mob_generator();
@@ -1060,6 +1068,7 @@ impl Game {
             MSGID_RESPONSE_LGNPTS => self.response_legion_pts(d),
             MSGID_RESPONSE_LGNSVC => self.handle_legion_service(d),
             crate::bots::MSGID_RESPONSE_BOTMEM => self.bots_memory_loaded(d),
+            crate::bots::MSGID_RESPONSE_BOTHIST => self.bots_history_loaded(d),
             // password checks: later layers
             _ => {}
         }

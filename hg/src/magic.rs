@@ -357,6 +357,7 @@ impl Game {
         }
         result = magic_hit_ratio(result, c.get_mag(), c.level, stype, c.fx.add_ar);
         if sp.category == 1 && self.maps[m].attribute(sx, sy, 0x05) != 0 {
+            self.safe_zone_notice(h, true);
             return;
         }
         self.remove_magic_effect(h, OWNERTYPE_PLAYER, MAGICTYPE_INVISIBILITY);

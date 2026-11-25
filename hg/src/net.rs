@@ -36,6 +36,9 @@ pub enum Ev {
     LsRead { i: usize, body: Vec<u8> },
     LsDown { i: usize },
     Stdin(String),
+    /// The model's line for bot `n` (empty when the request failed): `to` is the player it whispers to, as in the queued canned line; `with` is who
+    /// it talks with and `tone` (0 cold, 1 neutral, 2 warm) how it says it feels about them now.
+    BotLlm { n: usize, to: Option<String>, with: String, text: String, tone: Option<u8>, act: Option<crate::bots::Act>, note: Option<String> },
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(1);

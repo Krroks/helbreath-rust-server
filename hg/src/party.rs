@@ -3,7 +3,7 @@
 //! HG -> Login: [msgid][op][client][name 10][party id] in 50 bytes; op 1 create, 3 add member, 4 remove member,
 //! 5 check member (at entry), 6 info, 7 changing server. Login -> HG: 1 create result, 2 party deleted, 3 not a member,
 //! 4 join result, 5 info, 6 dismiss result (see PartyOperationResultHandler).
-use crate::client::STATUS_GREENSLATE;
+use crate::client::{Client, STATUS_GREENSLATE};
 use crate::consts::*;
 use crate::game::Game;
 use crate::log::log;
@@ -17,7 +17,63 @@ pub fn party_share(exp: i32, members: i32) -> i32 {
     (exp as f64 / m as f64 + 0.75f32 as f64) as i32
 }
 
+/// What the party frame of our client shows about a member (Rust only; see `Game::party_hud_flush`).
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct HudState {
+    pub hp: i32,
+    pub max_hp: i32,
+    pub mp: i32,
+    pub max_mp: i32,
+    pub level: i32,
+    pub dead: bool,
+    pub map: Vec<u8>,
+}
+
+fn hud_state(c: &Client) -> HudState {
+    HudState {
+        hp: c.hp,
+        max_hp: c.get_max_hp(),
+        mp: c.mp,
+        max_mp: c.get_max_mp(),
+        level: c.level,
+        dead: c.is_killed || c.hp <= 0,
+        map: cstr(&c.map_name).to_vec(),
+    }
+}
+
 impl Game {
+    /// Rust only: keeps the party frame of the clients that announced CLIENTFEATURE_PARTY_HUD up to date, with NOTIFY_PARTY_HUD:
+    /// a member's state when it changed, the whole roster when the party changed (and every 10 s, in case the client had not
+    /// yet heard of a member). The original clients never get it. Called every ~300 ms.
+    pub fn party_hud_flush(&mut self) {
+        let slot = (self.now() / 10_000) as u64;
+        for pid in self.parties.keys().copied().collect::<Vec<_>>() {
+            let members: Vec<usize> = self.party_members(pid).into_iter().filter(|&h| self.client(h).is_some_and(|c| c.is_init_complete)).collect();
+            let to: Vec<usize> = members.iter().copied().filter(|&h| self.client(h).unwrap().client_features & CLIENTFEATURE_PARTY_HUD != 0).collect();
+            if to.is_empty() {
+                continue;
+            }
+            let sig = members.iter().fold(pid as u64 ^ slot << 32, |a, &h| a.wrapping_mul(1_000_003).wrapping_add(h as u64 + 1));
+            let states: Vec<(usize, Vec<u8>, HudState)> = members.iter().map(|&h| {
+                let c = self.client(h).unwrap();
+                (h, c.char_name.clone(), hud_state(c))
+            }).collect();
+            for &r in &to {
+                let full = self.client(r).unwrap().hud_sig != sig;
+                for (h, name, st) in &states {
+                    if *h != r && (full || self.client(*h).unwrap().hud_sent != *st) {
+                        let v = [st.hp.max(0), st.max_hp.max(0), st.mp.max(0), st.max_mp.max(0), st.level, st.dead as i32];
+                        self.notify2(r, NOTIFY_PARTY_HUD, &v, Some(name), Some(&st.map));
+                    }
+                }
+                self.client_mut(r).unwrap().hud_sig = sig;
+            }
+            for (h, _, st) in states {
+                self.client_mut(h).unwrap().hud_sent = st;
+            }
+        }
+    }
+
     /// a raw MSGID_PARTYOPERATION (the op is where MSGTYPE goes)
     fn party_op(&mut self, op: u16, gsch: u16, name: &[u8], pid: i32) {
         let mut b = vec![0u8; 50];
@@ -55,6 +111,7 @@ impl Game {
         c.party_id = 0;
         c.party_status = PARTYSTATUS_NULL;
         c.req_join_party_h = 0;
+        c.hud_sig = 0;
     }
 
     /// NOTIFY_PARTY_COORDS about `from` to `to` (x, y given: 0, 0 when on another map)
@@ -468,6 +525,60 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::client::Client;
+    use crate::config::Settings;
+    use crate::map::Map;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+
+    fn member(g: &mut Game, h: usize, name: &str, hud: bool) -> UnboundedReceiver<Vec<u8>> {
+        let (tx, rx) = unbounded_channel();
+        let mut c = Client::new(h, h as u64, tx, b"1.2.3.4".to_vec(), 0);
+        c.char_name = name.as_bytes().to_vec();
+        c.map_name = b"default".to_vec();
+        (c.is_init_complete, c.level, c.party_id, c.client_features) = (true, 20, 1, if hud { CLIENTFEATURE_PARTY_HUD } else { 0 });
+        (c.str_, c.vit, c.dex, c.int_, c.mag) = (20, 20, 20, 10, 10);
+        c.hp = c.get_max_hp();
+        g.clients[h] = Some(c);
+        rx
+    }
+
+    /// (name, hp, max hp, level, flags) of every NOTIFY_PARTY_HUD queued for a client
+    fn huds(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<(String, u32, u32, u16, u8)> {
+        let mut v = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            let b = &f[3..];
+            let r = Rd::new(b);
+            if r.u32(0) == MSGID_NOTIFY && r.u16(4) as i32 == NOTIFY_PARTY_HUD {
+                assert_eq!(b.len(), 45);
+                assert_eq!(cstr(&b[16..26]), b"default");
+                v.push((String::from_utf8_lossy(cstr(&b[6..16])).into_owned(), r.u32(26), r.u32(30), r.u16(42), b[44]));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn the_party_frame_only_goes_to_clients_that_announced_it_and_only_what_changed() {
+        let (tx, _ev) = tokio::sync::mpsc::channel(8);
+        let mut g = Game::new(Default::default(), Settings::default(), vec![Map::new(b"default", 100, 100)], tx, String::new(), Some(1));
+        let mut a = member(&mut g, 1, "Alpha", true);
+        let mut b = member(&mut g, 2, "Beta", true);
+        let mut old = member(&mut g, 3, "Old", false);
+        g.parties.insert(1, vec![1, 2, 3]);
+        g.party_hud_flush();
+        let hp = g.client(2).unwrap().hp as u32;
+        assert_eq!(huds(&mut a), vec![("Beta".into(), hp, hp, 20, 0), ("Old".into(), hp, hp, 20, 0)], "the whole roster, not itself");
+        assert_eq!(huds(&mut b).len(), 2);
+        assert!(huds(&mut old).is_empty(), "an original client never gets it");
+        g.party_hud_flush();
+        assert!(huds(&mut a).is_empty() && huds(&mut b).is_empty(), "nothing changed");
+        let c = g.client_mut(2).unwrap();
+        (c.hp, c.is_killed) = (0, true);
+        g.party_hud_flush();
+        assert_eq!(huds(&mut a), vec![("Beta".into(), 0, hp, 20, 1)], "only Beta, dead");
+        assert!(huds(&mut b).is_empty(), "not about itself");
+    }
 
     #[test]
     fn share() {

@@ -102,6 +102,10 @@ impl Game {
         }
         if let Some(c) = self.client_mut(h) {
             c.ui_flags = d[6] & 7;
+            // Rust only: byte 7 = what this client can draw (the original clients send 7 bytes)
+            if let Some(&f) = d.get(7) {
+                c.client_features = f;
+            }
         }
     }
 

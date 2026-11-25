@@ -372,6 +372,17 @@ impl Game {
                 w.u32(6, a(0) as u32);
                 10
             }
+            NOTIFY_PARTY_HUD => {
+                // sV1 hp, sV2 max hp, sV3 mp, sV4 max mp, sV5 level, sV6 flags; pString the name, pString2 the map
+                w.bytes(6, &pad(s, 10));
+                w.bytes(16, &pad(s2, 10));
+                for k in 0..4 {
+                    w.u32(26 + k * 4, a(k) as u32);
+                }
+                w.u16(42, a(4) as u16);
+                w.u8(44, a(5) as u8);
+                45
+            }
             NOTIFY_SERVEREVENTS => {
                 w.u32(6, a(0) as u32);
                 w.u32(10, a(1) as u32);

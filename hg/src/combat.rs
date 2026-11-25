@@ -577,6 +577,19 @@ impl Game {
         if t != -1 { t } else { c.equip_status[EQUIPPOS_RHAND as usize] }
     }
 
+    /// Rust only: tells a player why his attack or attack spell did nothing (he or his target stands in a no-attack
+    /// zone), at most once a second.
+    pub fn safe_zone_notice(&mut self, h: usize, own_tile: bool) {
+        let now = self.now();
+        let Some(c) = self.client_mut(h) else { return };
+        if now.wrapping_sub(c.safe_zone_msg_time) < 1000 {
+            return;
+        }
+        c.safe_zone_msg_time = now;
+        let t: &[u8] = if own_tile { b"You are in a safe zone: you cannot attack here." } else { b"Your target is in a safe zone." };
+        self.notify(h, NOTIFY_NOTICEMSG, &[], Some(t));
+    }
+
     /// `calculateAttackEffect`: one physical hit; returns the exp the hit itself gives (NPCs' no-die exp).
     #[allow(clippy::too_many_arguments)]
     pub fn attack_effect(&mut self, th: usize, tt: u8, ah: usize, at: u8, tdx: i16, tdy: i16, mode: i32, near: bool, dash: bool) -> i32 {
@@ -739,7 +752,9 @@ impl Game {
         }
         if at == OWNERTYPE_PLAYER && tt == OWNERTYPE_PLAYER {
             let m = self.client(th).unwrap().map_index;
-            if self.maps[m].attribute(apos.0, apos.1, 0x06) != 0 || self.maps[m].attribute(tpos.0, tpos.1, 0x06) != 0 {
+            let mine = self.maps[m].attribute(apos.0, apos.1, 0x06) != 0;
+            if mine || self.maps[m].attribute(tpos.0, tpos.1, 0x06) != 0 {
+                self.safe_zone_notice(ah, mine);
                 return 0;
             }
         }

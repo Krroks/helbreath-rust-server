@@ -227,6 +227,11 @@ pub struct Client {
     pub req_join_party_h: usize,
     pub req_join_party_name: Vec<u8>,
     pub party_hp_count: i32,
+    /// CLIENTFEATURE_* bits the client announced (0 for the original clients)
+    pub client_features: u8,
+    /// what the party frame was last told about this player, and the party roster this player's frame was last given
+    pub hud_sent: crate::party::HudState,
+    pub hud_sig: u64,
     pub party_mp_count: i32,
     pub gizon_item_upgrade_left: i32,
     pub elo: i32,
@@ -266,6 +271,8 @@ pub struct Client {
     pub exp_stock_time: u32,
     pub auto_exp_time: u32,
     pub recent_attack_time: u32,
+    /// last "safe zone" notice shown to this player (Rust only), so a held attack does not flood the chat
+    pub safe_zone_msg_time: u32,
     pub last_action_time: u32,
     pub logout_hack_check: u32,
     pub init_cc_time_rcv: u32,
@@ -399,6 +406,9 @@ impl Client {
             req_join_party_h: 0,
             req_join_party_name: Vec::new(),
             party_hp_count: 0,
+            client_features: 0,
+            hud_sent: Default::default(),
+            hud_sig: 0,
             party_mp_count: 0,
             gizon_item_upgrade_left: 0,
             elo: 0,
@@ -436,6 +446,7 @@ impl Client {
             exp_stock_time: now,
             auto_exp_time: now,
             recent_attack_time: now,
+            safe_zone_msg_time: 0,
             last_action_time: now,
             logout_hack_check: 0,
             init_cc_time_rcv: 0,

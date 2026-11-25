@@ -270,6 +270,10 @@ pub const NOTIFY_TELEPORT_REJECTED: i32 = 3086;
 pub const NOTIFY_SERVEREVENTS: i32 = 3087;
 // v8.00 client toggles (/typing, /lowhealth, /itemnames) kept with the character: the server sends them on entering (also in Shared/NetMessages.h)
 pub const NOTIFY_CLIENTFLAGS: i32 = 3088;
+// party HUD (no C++ original; also in Shared/NetMessages.h): a member's state for the client's party frame
+pub const NOTIFY_PARTY_HUD: i32 = 3089;
+/// bit of byte 7 of MSGID_REQUEST_CLIENTFLAGS: this client draws the party frame
+pub const CLIENTFEATURE_PARTY_HUD: u8 = 1;
 pub const NOTIFY_SLATECLEAR: i32 = 99;
 pub const COMMONTYPE_REQ_CREATESLATE: i32 = 2657;
 pub const MSGID_REQUEST_INITPLAYER: u32 = 0x504020e;

@@ -210,6 +210,21 @@ client has and the 3.82-based one lacked. The original client never sends them, 
 
 - **Mobs**: Scarecrow (type 92) and Princess (type 102) sprites loaded from the v8.00 paks (client only, no server change).
 
+- **Safe-zone notice** (2026-11-24, `combat.rs` `safe_zone_notice`): an attack spell cast from a no-attack tile, or a hit between players
+  when either stands on one, was dropped silently; now the attacker also gets a NOTIFY_NOTICEMSG ("You are in a safe zone: you cannot
+  attack here." / "Your target is in a safe zone."), at most once a second per player (`Client.safe_zone_msg_time`). Damage rules are
+  unchanged. Every client gets it (a notice message is something the original client already shows).
+
+- **Party frame** (2026-11-25, `party.rs` `party_hud_flush`, our client's `DrawPartyFrame`, `PartyHud.pak`): the 3.82 party bars only knew
+  the members on the same map and were fed by NOTIFY_PARTY_COORDS every 4th HP / 7th MP notify. Our client now announces what it can
+  draw in byte 7 of MSGID_REQUEST_CLIENTFLAGS (`CLIENTFEATURE_PARTY_HUD`, sent on entering, when the server's NOTIFY_CLIENTFLAGS
+  arrives; the original client sends 7 bytes, so `client_features` stays 0). Only those clients get **NOTIFY_PARTY_HUD** (0x0C0E + 3 =
+  3089): `[name 10][map 10][hp u32][max hp u32][mp u32][max mp u32][level u16][flags u8, 1 = dead]` (45 bytes), for every local
+  member of the party whatever its map, and never about the receiver itself. `party_hud_flush` runs every ~300 ms: a member's state
+  goes out when it changed since the last flush (`Client.hud_sent`), the whole roster when the party's members changed (`hud_sig`,
+  cleared on leaving) and every 10 s in case the client had not yet heard of a member. NOTIFY_PARTY_COORDS is untouched and still
+  feeds the minimap dots. Test: `the_party_frame_only_goes_to_clients_that_announced_it_and_only_what_changed` (party.rs).
+
 ## Health page `/stats` (Rust only, `stats.rs`)
 
 Every 2 s the game loop (top of `on_timer`) builds a JSON snapshot into `bots_web::Shared::stats`; the same 127.0.0.1 listener as the bots page

@@ -39,6 +39,10 @@ pub const MSGID_SUBCASH: u32 = 0x0FC94225 + M4;
 pub const MSGID_REQUEST_BOTMEM: u32 = 0x0FC94230 + M4;
 pub const MSGID_BOTMEM_SAVE: u32 = 0x0FC94231 + M4;
 pub const MSGID_RESPONSE_BOTMEM: u32 = 0x0FC94232 + M4;
+// and what they said, did and concluded (hg `bots.rs`), kept in the `bot_history` table, one row each
+pub const MSGID_REQUEST_BOTHIST: u32 = 0x0FC94233 + M4;
+pub const MSGID_BOTHIST_SAVE: u32 = 0x0FC94234 + M4;
+pub const MSGID_RESPONSE_BOTHIST: u32 = 0x0FC94235 + M4;
 
 pub const MSGID_ITEMCONFIGURATIONCONTENTS: u32 = 0x0FA314D9 + M4;
 pub const MSGID_NPCCONFIGURATIONCONTENTS: u32 = 0x0FA314DA + M4;

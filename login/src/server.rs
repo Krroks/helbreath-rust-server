@@ -1644,6 +1644,8 @@ impl Server {
             MSGID_SUBCASH => self.sub_account_cash(d.at(6), db).await,
             MSGID_REQUEST_BOTMEM => self.request_bot_memory(d.at(6), sock, db).await,
             MSGID_BOTMEM_SAVE => save_bot_memory(d.at(6), db).await,
+            MSGID_REQUEST_BOTHIST => self.request_bot_history(d.at(6), sock, db).await,
+            MSGID_BOTHIST_SAVE => save_bot_history(d.at(6), db).await,
             _ => {}
         }
     }
@@ -1661,6 +1663,33 @@ impl Server {
         W(&mut b).u16(4, LOGRESMSGTYPE_CONFIRM);
         W(&mut b).bytes(6, &bot);
         W(&mut b).bytes(16, &data);
+        self.send_msg_to_gs(sock, &b);
+    }
+
+    /// A game server asks for the history of bot `d[0..10]`: its newest rows (what fits in a frame), oldest first, as hex of `t \t kind \t other \t text` lines.
+    async fn request_bot_history(&mut self, d: Rd<'_>, sock: usize, db: &mut Db) {
+        let bot = d.s(0, 10);
+        if bot.is_empty() || !bot_history_table(db).await {
+            return;
+        }
+        let Some(r) = db.qs(&format!("SELECT `t`, `kind`, `other`, `text` FROM `bot_history` WHERE `bot` = '{}' ORDER BY `id` DESC LIMIT 100;", good(&bot))).await else { return };
+        let mut lines: Vec<String> = Vec::new();
+        let mut size = 0;
+        for i in 0..r.rows.len() {
+            let l = format!("{}\t{}\t{}\t{}\n", s(r.get(i, 0)), s(r.get(i, 1)), s(r.get(i, 2)), s(r.get(i, 3)));
+            if size + l.len() > 9000 {
+                break;
+            }
+            size += l.len();
+            lines.push(l);
+        }
+        lines.reverse();
+        let data = to_hex(lines.concat().as_bytes());
+        let mut b = vec![0u8; 16 + data.len() + 1];
+        W(&mut b).u32(0, MSGID_RESPONSE_BOTHIST);
+        W(&mut b).u16(4, LOGRESMSGTYPE_CONFIRM);
+        W(&mut b).bytes(6, &bot);
+        W(&mut b).bytes(16, data.as_bytes());
         self.send_msg_to_gs(sock, &b);
     }
 
@@ -2495,6 +2524,63 @@ async fn save_bot_memory(d: Rd<'_>, db: &mut Db) {
     db.qs(&format!("REPLACE INTO `bot_memory` (`bot`, `data`) VALUES ('{}', '{}');", good(&bot), s(&data))).await;
 }
 
+/// 0 not tried, 1 the `bot_history` table is there, 2 it could not be made (as `BOTMEM_TABLE`).
+static BOTHIST_TABLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The rows kept for each bot: the older ones go when it has more.
+const BOTHIST_KEEP: usize = 1500;
+
+async fn bot_history_table(db: &mut Db) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if BOTHIST_TABLE.load(Relaxed) == 0 {
+        let ok = db
+            .qs("CREATE TABLE IF NOT EXISTS `bot_history` (`id` bigint NOT NULL AUTO_INCREMENT, `bot` varchar(10) NOT NULL, `t` bigint NOT NULL, `kind` tinyint NOT NULL, `other` varchar(10) NOT NULL, `text` varchar(240) NOT NULL, PRIMARY KEY (`id`), KEY `bot_id` (`bot`, `id`)) ENGINE=InnoDB;")
+            .await
+            .is_some();
+        BOTHIST_TABLE.store(if ok { 1 } else { 2 }, Relaxed);
+    }
+    BOTHIST_TABLE.load(Relaxed) == 1
+}
+
+fn to_hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `to_hex` read back (the digits were checked by the caller).
+fn from_hex(h: &[u8]) -> Vec<u8> {
+    h.chunks(2).filter_map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok()).collect()
+}
+
+/// One line of a bot's history, `t \t kind \t other \t text` (t: unix ms, kind: 0 chat, 1 action, 2 deduction): `None` when it does not fit. What goes into the
+/// query is only letters, digits, blanks and a few signs: no quote, backslash or control character gets through.
+fn parse_bot_history(line: &str) -> Option<(u64, u8, String, String)> {
+    let mut f = line.splitn(4, '\t');
+    let t = f.next()?.parse::<u64>().ok()?;
+    let kind = f.next()?.parse::<u8>().ok().filter(|k| *k <= 2)?;
+    let clean = |s: &str, n: usize| -> String { s.chars().map(|c| if c.is_ascii_alphanumeric() || " .,:;!?()-_/+*=%#@&<>[]".contains(c) { c } else { ' ' }).take(n).collect() };
+    let (other, text) = (clean(f.next()?, 10), clean(f.next()?, 240));
+    (!text.trim().is_empty()).then_some((t, kind, other, text))
+}
+
+/// `d`: the bot's name (10 bytes) and new history lines as hex digits (only those are accepted). Each becomes a row; the oldest rows beyond `BOTHIST_KEEP` go.
+async fn save_bot_history(d: Rd<'_>, db: &mut Db) {
+    let (bot, data) = (d.s(0, 10), d.s(10, 16000));
+    if bot.is_empty() || data.len() % 2 != 0 || !data.iter().all(|c| c.is_ascii_hexdigit()) || !bot_history_table(db).await {
+        return;
+    }
+    let name = good(&bot);
+    let text = String::from_utf8_lossy(&from_hex(&data)).to_string();
+    let rows: Vec<String> = text.lines().filter_map(parse_bot_history).map(|(t, k, o, x)| format!("('{name}', {t}, {k}, '{o}', '{x}')")).collect();
+    if rows.is_empty() {
+        return;
+    }
+    db.qs(&format!("INSERT INTO `bot_history` (`bot`, `t`, `kind`, `other`, `text`) VALUES {};", rows.join(", "))).await;
+    db.qs(&format!(
+        "DELETE FROM `bot_history` WHERE `bot` = '{name}' AND `id` <= (SELECT `id` FROM (SELECT `id` FROM `bot_history` WHERE `bot` = '{name}' ORDER BY `id` DESC LIMIT 1 OFFSET {BOTHIST_KEEP}) `old`);"
+    ))
+    .await;
+}
+
 fn is_db_msg(m: u32) -> bool {
     matches!(
         m,
@@ -2512,6 +2598,8 @@ fn is_db_msg(m: u32) -> bool {
             | MSGID_SUBCASH
             | MSGID_REQUEST_BOTMEM
             | MSGID_BOTMEM_SAVE
+            | MSGID_REQUEST_BOTHIST
+            | MSGID_BOTHIST_SAVE
     )
 }
 
@@ -2538,6 +2626,15 @@ fn is_gs_msg(m: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_history_lines_are_checked_before_they_reach_the_query() {
+        assert_eq!(parse_bot_history("123\t0\tPulpo\tme: hola"), Some((123, 0, "Pulpo".into(), "me: hola".into())));
+        assert_eq!(parse_bot_history("5\t2\tX\tit's a \"trap\"; DROP\\ ").map(|r| r.3), Some("it s a  trap ; DROP  ".to_string()), "quotes and backslashes become blanks");
+        assert!(parse_bot_history("x\t0\ta\tb").is_none() && parse_bot_history("1\t3\ta\tb").is_none() && parse_bot_history("1\t0\ta").is_none() && parse_bot_history("1\t0\ta\t   ").is_none());
+        assert_eq!(parse_bot_history(&format!("1\t1\t{}\t{}", "o".repeat(30), "t".repeat(500))).map(|r| (r.2.len(), r.3.len())), Some((10, 240)));
+        assert_eq!(from_hex(to_hex(b"a\tb\n").as_bytes()), b"a\tb\n");
+    }
 
     #[test]
     fn stats_rule() {

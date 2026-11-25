@@ -145,6 +145,16 @@ pub struct BotCfg {
     pub raid_level: i32,
     pub raid_cooldown_ms: u32,
     pub raid_ms: u32,
+    /// base URL of an OpenAI-compatible server ("" = no LLM: canned lines only), its model, and how long a bot waits for an answer
+    pub llm_url: String,
+    pub llm_model: String,
+    /// API key of the model's server, sent as `Authorization: Bearer` ("" = none); it lives only in the local Bots.cfg, never in the repository
+    pub llm_key: String,
+    pub llm_ms: u32,
+    /// requests to the model in flight at once (bots talking to bots get one less, so that the players always find a place)
+    pub llm_parallel: usize,
+    /// the language the bots chat in: `Some(false)` Spanish, `Some(true)` English, `None` the one the other one writes in
+    pub language: Option<bool>,
 }
 
 impl Default for BotCfg {
@@ -247,6 +257,12 @@ impl Default for BotCfg {
             raid_ms: 180_000,
             roam_idle_ms: 8000,
             hunt_level_step: 6,
+            llm_url: String::new(),
+            llm_model: String::new(),
+            llm_key: String::new(),
+            llm_ms: 10_000,
+            llm_parallel: 4,
+            language: None,
         }
     }
 }
@@ -323,6 +339,7 @@ flee                 = 1          // below flee-percent HP, with no potion or sc
 flee-percent         = 25
 recover              = 1          // below tired-percent HP (a mage: below 30 % mana) it stands still, away from monsters, until recover-percent
 recover-percent      = 70
+language             = auto       // es, en or auto: the language the bots chat in (their canned lines and the model's). auto = the one the other one wrote in, else a coin
 chat                 = 1          // answers a greeting, its name or a whisper from a player, and now and then greets one that comes close
 chat-greet-percent   = 35         // chance that it says hello to a player that comes within 6 tiles (once in 10 minutes for each)
 chat-bots            = 1          // bots near each other talk now and then (3 lines); warm or cold by how each feels about the other (-100..100: it moves with every talk and with every party they hunt in)
@@ -356,6 +373,12 @@ web-port             = 8097       // 127.0.0.1:port serves the bots as JSON (/ap
 roam                 = 1          // with no monster in sight for roam-idle-ms it walks to a hunting ground (possibly through teleports)
 roam-idle-ms         = 8000
 hunt-level-step      = 6          // it fights monsters of HitDice up to 2 + level / this (0 = any): level 1 slimes, 12 orcs, 24 scorpions
+// llm-url           =            // base URL of an OpenAI-compatible server (POST <url>/v1/chat/completions, needs `curl` in the PATH): when set, the
+//                                // answers to players are written by the model, and the canned line is said when it fails or is late. Empty = off
+// llm-model         =            // model name sent with the request (empty = the server's)
+// llm-key           =            // API key of the model's server, sent as 'Authorization: Bearer <key>' (empty = none). Put it only in your own Bots.cfg
+// llm-timeout-ms    = 10000      // how long a bot waits for the model
+// llm-parallel      = 4          // requests to the model at once (the talks between bots get one less); the others say a canned line (counted in the summary)
 ";
 
 impl BotCfg {
@@ -363,6 +386,16 @@ impl BotCfg {
     /// A character of the bots: one of the names, or a name with the prefix.
     pub fn is_bot(&self, name: &[u8]) -> bool {
         name.starts_with(self.name_prefix.as_bytes()) || self.name_set.contains(name)
+    }
+
+    /// Requests to the model that a talk between bots may have in flight: one less than the players' (never none).
+    fn llm_for_bots(&self) -> usize {
+        self.llm_parallel.saturating_sub(1).max(1)
+    }
+
+    /// Whether to chat in English: always the configured language, else what was `detected`.
+    pub fn english(&self, detected: bool) -> bool {
+        self.language.unwrap_or(detected)
     }
 
     /// Reads `BotNames.txt` next to the config file: one name per line (letters and digits, 10 at most; others are skipped).
@@ -385,7 +418,9 @@ impl BotCfg {
         let mut c = BotCfg::default();
         let mut warn = Vec::new();
         for (n, line) in text.lines().enumerate() {
-            let line = line.split("//").next().unwrap().split('#').next().unwrap().trim();
+            // a "//" starts a comment only at the start of the line or after a blank: "llm-url = https://host" keeps its scheme
+            let cut = line.match_indices("//").map(|(i, _)| i).find(|&i| i == 0 || line[..i].ends_with(char::is_whitespace));
+            let line = line[..cut.unwrap_or(line.len())].split('#').next().unwrap().trim();
             if line.is_empty() {
                 continue;
             }
@@ -495,6 +530,18 @@ impl BotCfg {
                 ("raid-level", Some(x)) => c.raid_level = x.clamp(1, 180) as i32,
                 ("raid-cooldown-ms", Some(x)) => c.raid_cooldown_ms = x.max(0) as u32,
                 ("raid-ms", Some(x)) => c.raid_ms = x.max(10_000) as u32,
+                ("language", _) => match v.to_ascii_lowercase().as_str() {
+                    "es" | "spanish" => c.language = Some(false),
+                    "en" | "english" => c.language = Some(true),
+                    "auto" => c.language = None,
+                    _ => warn.push(format!("language wants es, en or auto, got '{v}'")),
+                },
+                ("llm-url", _) => c.llm_url = v.trim_end_matches('/').to_string(),
+                ("llm-model", _) => c.llm_model = v.to_string(),
+                ("llm-key", _) if v.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-.".contains(ch)) => c.llm_key = v.to_string(),
+                ("llm-key", _) => warn.push("llm-key: only letters, digits, _ - and . are accepted; ignored".to_string()),
+                ("llm-timeout-ms", Some(x)) => c.llm_ms = x.clamp(1000, 60_000) as u32,
+                ("llm-parallel", Some(x)) => c.llm_parallel = x.clamp(1, 16) as usize,
                 ("party", _) if flag.is_some() => c.party = flag.unwrap(),
                 ("raid", _) if flag.is_some() => c.raid = flag.unwrap(),
                 ("cast-range", Some(x)) => c.cast_range = x.clamp(1, 10) as i16,
@@ -752,6 +799,20 @@ pub struct Bot {
     flee_steps: u32,
     last_greet_look: u32,
     greeted: Vec<(String, u32)>,
+    /// the last things others said to it ("name: line", 4 at most): what it knows from them and tells the model, so news pass from bot to bot
+    heard: Vec<String>,
+    /// what a talk made it commit to (`Act`, the other one's name, until when it is still worth doing) and when it last did one
+    act: Option<(Act, String, u32)>,
+    last_act: u32,
+    /// its history (the newest `HIST_RAM` rows: what it said and heard, did and concluded), the rows the Login has not got yet, when they were last sent,
+    /// whether the Login's answer to the request has come, and who it last talked with (for the lines it says)
+    hist: Vec<Hist>,
+    hist_new: Vec<Hist>,
+    hist_saved: u32,
+    hist_synced: bool,
+    last_with: String,
+    /// the kind of monster it killed last (for what it tells the model it sees)
+    last_prey: String,
     last_drop_check: u32,
     /// its pace (index in PACES) and what that makes of the timings
     pace: usize,
@@ -794,6 +855,12 @@ pub struct Bot {
 pub const MSGID_REQUEST_BOTMEM: u32 = 0x0FC94237;
 pub const MSGID_BOTMEM_SAVE: u32 = 0x0FC94238;
 pub const MSGID_RESPONSE_BOTMEM: u32 = 0x0FC94239;
+// the history of a bot (what it said, did and concluded): the same three messages, in the Login's `bot_history` table
+pub const MSGID_REQUEST_BOTHIST: u32 = 0x0FC9423A;
+pub const MSGID_BOTHIST_SAVE: u32 = 0x0FC9423B;
+pub const MSGID_RESPONSE_BOTHIST: u32 = 0x0FC9423C;
+/// rows of its history a bot keeps at hand (the Login keeps more)
+const HIST_RAM: usize = 120;
 /// the least time between two saves of one bot's memory (ms)
 const MEM_SAVE_MS: u32 = 120_000;
 
@@ -810,6 +877,40 @@ struct Mem {
     en: Option<bool>,
     /// for another bot (the name is its character): how it feels about it, -100 (enemy) to 100 (friend), on top of `chemistry`
     aff: i32,
+}
+
+/// One thing in a bot's history, kept in the Login's `bot_history` table: kind 0 a chat line (`text` is "who: line", `other` the one it talks with),
+/// 1 something it did, 2 a deduction of its own (`other`: who or what it is about).
+#[derive(Clone, Debug, PartialEq)]
+struct Hist {
+    t: u64,
+    kind: u8,
+    other: String,
+    text: String,
+}
+
+/// The rows as the Login takes them: `t \t kind \t other \t text` lines, in hex.
+fn hist_encode(rows: &[Hist]) -> String {
+    let text: String = rows.iter().map(|h| format!("{}\t{}\t{}\t{}\n", h.t, h.kind, h.other, h.text)).collect();
+    text.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `hist_encode` read back (what the Login sends); what does not parse is skipped.
+fn hist_decode(hex: &[u8]) -> Vec<Hist> {
+    let bytes: Vec<u8> = hex.chunks(2).filter_map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok()).collect();
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.splitn(4, '\t');
+            Some(Hist { t: f.next()?.parse().ok()?, kind: f.next()?.parse().ok().filter(|k| *k <= 2)?, other: f.next()?.to_string(), text: f.next()?.to_string() })
+        })
+        .collect()
+}
+
+/// "5 min", "3 h", "2 d": how long ago `t` was (unix ms).
+fn ago(t: u64, now: u64) -> String {
+    let m = now.saturating_sub(t) / 60_000;
+    if m < 60 { format!("{m} min") } else if m < 48 * 60 { format!("{} h", m / 60) } else { format!("{} d", m / 1440) }
 }
 
 /// A talk between two bots: who started it (`a`) and who is asked (`b`) (bot numbers), who speaks next, the lines said so far (it ends at 3),
@@ -890,6 +991,12 @@ pub struct Bots {
     chat_q: Vec<(usize, Option<String>, String, u32)>,
     /// the talks between bots that are going on
     talks: Vec<Talk>,
+    /// requests to the model that have not answered yet (at most `llm-parallel`: the others say their canned line), and how many lines the model
+    /// wrote, how many requests failed and how many lines were canned because the model was busy (since the start, for the summary)
+    llm_busy: usize,
+    llm_ok: u32,
+    llm_fail: u32,
+    llm_canned: u32,
     /// to start the tasks of bots added while it runs; where the config file is, when it was last read, the next look
     pub ev: Option<net::EvTx>,
     pub cfg_path: String,
@@ -1005,6 +1112,55 @@ impl Bot {
         let i = self.mem_slot(name);
         self.mem[i].aff = (self.mem[i].aff + d).clamp(-100, 100);
         self.mem[i].last = now;
+    }
+
+    /// Adds a row to its history (kept at hand and queued for the Login). `other`: who it is with or about.
+    fn remember(&mut self, kind: u8, other: &str, text: &str) {
+        let clean = |s: &str, n: usize| s.chars().map(|c| if c.is_control() { ' ' } else { c }).take(n).collect::<String>();
+        let h = Hist { t: unix_ms(), kind, other: clean(other, 10), text: clean(text, 200) };
+        self.hist.push(h.clone());
+        if self.hist.len() > HIST_RAM {
+            self.hist.remove(0);
+        }
+        self.hist_new.push(h);
+        if self.hist_new.len() > 300 {
+            self.hist_new.remove(0); // the Login has been away for long
+        }
+    }
+
+    /// For the model: what it remembers that matters when it talks with `with`: the last lines they exchanged, its own earlier deductions and what it did
+    /// lately. Ends with a space ("" when it remembers nothing).
+    fn history_hint(&self, with: &str) -> String {
+        let now = unix_ms();
+        let last = |kind: u8, who: Option<&str>, n: usize| -> Vec<&Hist> {
+            let mut v: Vec<&Hist> = self.hist.iter().rev().filter(|h| h.kind == kind && who.is_none_or(|w| h.other == w)).take(n).collect();
+            v.reverse();
+            v
+        };
+        let join = |v: Vec<&Hist>, about: bool| v.iter().map(|h| format!("{}{} ({} ago)", if about { format!("{}: ", h.other) } else { String::new() }, h.text, ago(h.t, now))).collect::<Vec<_>>().join(" | ");
+        let (talks, notes, did) = (last(0, Some(with), 6), last(2, None, 5), last(1, None, 4));
+        if talks.is_empty() && notes.is_empty() && did.is_empty() {
+            return String::new();
+        }
+        let mut s = String::from("Your own memory, from before: ");
+        if !talks.is_empty() {
+            s += &format!("lines you and {with} exchanged earlier: {}. ", join(talks, false));
+        }
+        if !notes.is_empty() {
+            s += &format!("conclusions you drew: {}. ", join(notes, true));
+        }
+        if !did.is_empty() {
+            s += &format!("what you did: {}. ", join(did, false));
+        }
+        s + "Use it only if it fits; never contradict it. "
+    }
+
+    /// `name` said `text` to it: kept for what it tells next (the oldest of 4 goes).
+    fn hear(&mut self, name: &str, text: &str) {
+        if self.heard.len() >= 4 {
+            self.heard.remove(0);
+        }
+        self.heard.push(format!("{name}: {}", text.chars().take(80).collect::<String>()));
     }
 
     fn speaks(&mut self, name: &str, english: bool) {
@@ -1163,6 +1319,12 @@ fn doing(mode: Mode, level: i32, map: &str, english: bool) -> String {
     }
 }
 
+/// Sets off for tile `to` of map `map`, the home it hunts around from then on: the same switch as `Game::bot_follow`.
+fn go_to(b: &mut Bot, map: usize, to: (i16, i16)) {
+    (b.home, b.mode, b.no_route_logged, b.wander, b.idle_since, b.target) = (Some((map, to)), Mode::Travel, false, None, None, 0);
+    b.path.clear();
+}
+
 /// What a player said, as the words of the text.
 fn words(text: &str) -> Vec<String> {
     text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect()
@@ -1225,6 +1387,233 @@ fn mem_decode(hex: &[u8]) -> Vec<Mem> {
         })
         .take(MEM_MAX)
         .collect()
+}
+
+/// The Spanish names (no accents, like the chat) of the monsters of Npc.cfg, by their game name; a monster that is not here keeps its own.
+const MONSTERS_ES: [(&str, &str); 49] = [
+    ("Slime", "babosa"), ("Amphis", "anfisbena"), ("Orc", "orco"), ("Scorpion", "escorpion"), ("Skeleton", "esqueleto"), ("Zombie", "zombi"), ("Orc-Mage", "orco mago"),
+    ("Stone-Golem", "golem de piedra"), ("Clay-Golem", "golem de arcilla"), ("Ice-Golem", "golem de hielo"), ("Hellbound", "sabueso infernal"), ("Giant-Frog", "rana gigante"),
+    ("Rudolph", "reno Rudolph"), ("Orge", "ogro"), ("Troll", "trol"), ("Cyclops", "ciclope"), ("Tentocle", "tentaculo"), ("Beholder", "contemplador"),
+    ("Mountain-Giant", "gigante de montana"), ("Giant-Plant", "planta gigante"), ("Cannibal-Plant", "planta canibal"), ("Claw-Turtle", "tortuga garra"), ("Liche", "liche"),
+    ("Stalker", "acechador"), ("DireBoar", "jabali atroz"), ("Frost", "escarcha"), ("WereWolf", "hombre lobo"), ("Dark-Elf", "elfo oscuro"), ("Giant-Crayfish", "cangrejo gigante"),
+    ("MasterMage-Orc", "orco maestro mago"), ("Centaurus", "centauro"), ("Unicorn", "unicornio"), ("Minotaurs", "minotauro"), ("Demon", "demonio"), ("Barlog", "balrog"),
+    ("Gagoyle", "gargola"), ("Giant-Lizard", "lagarto gigante"), ("Hellclaw", "garra infernal"), ("Tigerworm", "gusano tigre"), ("Fire-Wyvern", "wyvern de fuego"),
+    ("Rabbit", "conejo"), ("Cat", "gato"), ("Giant-Ant", "hormiga gigante"), ("Ghost", "fantasma"), ("Vampire", "vampiro"), ("Fire-Pixie", "duende de fuego"),
+    ("Ice-Pixie", "duende de hielo"), ("Earth-Pixie", "duende de tierra"), ("Air-Pixie", "duende de aire"),
+];
+
+/// "escorpion (Scorpion)": the Spanish name and the one of the game, so that the model neither translates it wrongly nor misses what a player calls it.
+fn monster_name(game_name: &str) -> String {
+    MONSTERS_ES.iter().find(|(en, _)| en.eq_ignore_ascii_case(game_name)).map_or_else(|| game_name.to_string(), |(en, es)| format!("{es} ({en})"))
+}
+
+/// How a bot sees itself, fixed by its number: class, temper, pace, hobby and a way of talking, so that they do not all sound the same.
+fn llm_persona(b: &Bot) -> String {
+    const STYLES: [&str; 6] = ["you talk little and dryly", "you are chatty and love jokes", "you are polite and friendly", "you are blunt and a bit rude", "you are enthusiastic and use exclamations", "you are sleepy and lazy"];
+    format!(
+        "You are a {}, {} by nature and {} in pace{}; {}.",
+        ["warrior", "mage", "knight", "duelist", "archer"][b.arch.min(4) as usize],
+        ["cautious", "steady", "bold"][b.temper.min(2) as usize],
+        ["relaxed", "steady", "driven"][b.pace.min(2)],
+        if b.hobby == 1 { ", fond of fishing" } else { "" },
+        STYLES[(((b.n as u32).wrapping_mul(2_654_435_761) >> 16) % 6) as usize]
+    )
+}
+
+/// What the model is told about the bot that answers: who it is, where, what it does, what it heard lately from others and what it knows of
+/// the player. It answers with its chat line and a second line `TONE: cold|neutral|warm` (`llm_tone`): how it feels about the player now.
+fn llm_system(b: &Bot, level: i32, map: &str, before: &Mem, now_ms: u64, extra: &str) -> String {
+    let mut s = format!(
+        "You are {}, a level {level} player of Helbreath, an old fantasy MMORPG. {} You are in the map {map} (an internal name), {}. Another player talks to you in the game chat. \
+         Answer with ONE short chat line, 60 characters at most, casual and lowercase like someone typing fast: no quotes, no emojis, no accents, no markdown, \
+         no narration, no commands. When you write Spanish, write only the Castilian Spanish of Spain, and the only slang you may use is Helbreath player slang (lvl, mobs, drops, pots, \
+         farmear, party, PK, spawn): absolutely no Latin American words or expressions (never ni modo, holi, chau, jalar, che, ahorita, orale, bacan, pana, chamba, buena onda), no \
+         abbreviations such as xdd or q, no made-up words and no invented diminutives. Keep your tenses right: a line that says you are leaving is in the present or the future \
+         (\"me voy\"), never in the past (\"ya me fui\"). Never invent things that happened before (fights, deaths, drops) or plans you cannot carry out. \
+         Then, on a second line, write TONE: cold, neutral or warm, how you feel towards this player after this exchange. \
+         On a third line write ACTION: none, unless your chat line itself says you are doing one of these, in which case you MUST write it: party (you invite them to a party), \
+         follow (you walk to where they are to hunt together: \"voy contigo\"), find (you leave to look for more people), leave (you go hunting on another map: \"me voy a otro mapa\"), \
+         fight (you attack them, only if they are a rival), give (you hand them some gold) or fish (you go fishing, only if you are fond of fishing). \
+         Never say you are leaving or going somewhere (not even to fish) when no action fits it. \
+         On a fourth line write NOTE: one short lasting conclusion you draw from this exchange, only from what was said or listed (about the player, the place or the game, 80 characters \
+         at most), or NOTE: none. ",
+        b.ch,
+        llm_persona(b),
+        doing(b.mode, level, map, true)
+    );
+    if !b.heard.is_empty() {
+        s += &format!("What other players told you lately (mention it or pass it on only if it fits): {}. ", b.heard.join(" | "));
+    }
+    if before.met > 0 {
+        s += &format!("You have met this player {} times before. ", before.met);
+    }
+    if before.hit > 0 && now_ms.saturating_sub(before.hit) < GRUDGE_MS {
+        s += "They hit you not long ago and you are wary of them. ";
+    }
+    s + extra
+}
+
+/// What a talk can make a bot do (the model's `ACTION:` line); `Game::bot_act` checks and does it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Act {
+    Party,
+    Follow,
+    Find,
+    Leave,
+    Fight,
+    Give,
+    Fish,
+}
+
+/// The `ACTION:` the model wrote after its line (`None` for "none", no line or a word it does not know).
+fn llm_action(text: &str) -> Option<Act> {
+    let l = text.to_ascii_lowercase();
+    let w = l[l.find("action:")? + 7..].trim_start().to_string();
+    [("party", Act::Party), ("follow", Act::Follow), ("find", Act::Find), ("leave", Act::Leave), ("fight", Act::Fight), ("give", Act::Give), ("fish", Act::Fish)].into_iter().find(|(k, _)| w.starts_with(k)).map(|(_, a)| a)
+}
+
+/// Three-letter words that start a name now and then but are not a call: a shortened name needs 4 letters, or 3 that are not one of these.
+const NAME_STOP: [&str; 38] = [
+    "que", "mas", "por", "con", "los", "las", "una", "del", "muy", "sin", "hay", "voy", "vas", "van", "ven", "ver", "the", "and", "you", "for", "not", "yes", "hey", "can", "how", "who", "why", "all", "one", "mis", "tus", "sus",
+    "fue", "era", "ser", "dar", "bot", "hoy",
+];
+
+/// Whether `text` calls `name`: the whole name, or a shortening of it (Zampa for Zampabollo): a word that starts the name and no other bot's name.
+fn names_me(cfg: &BotCfg, text: &str, name: &str) -> bool {
+    let n = name.to_lowercase();
+    text.to_lowercase().contains(&n)
+        || words(text).iter().any(|w| w.len() >= 3 && n.starts_with(w.as_str()) && !NAME_STOP.contains(&w.as_str()) && cfg.names.iter().filter(|o| o.to_lowercase().starts_with(w.as_str())).count() <= 1)
+}
+
+/// The language the model is told to write in: the one the player used (Spanish when unsure), or the configured one.
+fn llm_lang_hint(language: Option<bool>) -> &'static str {
+    match language {
+        None => "Answer in the language the player wrote in (Spanish or English; Spanish if unsure). ",
+        Some(false) => "Always write in Spanish, whatever language the player uses. ",
+        Some(true) => "Always write in English, whatever language the player uses. ",
+    }
+}
+
+/// What a bot is told about a talk with another bot: the language, how it feels about the other one (`tone` 0 cold, 1 neutral, 2 warm),
+/// whether it opens the talk or answers (`last`: its line ends the talk) and `rival` (`Game::rival_hint`).
+fn llm_talk_hint(en: bool, tone: u8, opens: bool, last: bool, rival: &str) -> String {
+    format!(
+        "Write in {}. {rival}{} {} {}",
+        if en { "English" } else { "Spanish" },
+        ["You dislike this player: be curt and cold.", "You feel neutral about this player.", "This player is a friend: be warm and friendly."][tone.min(2) as usize],
+        if opens { "You are the one who starts the talk: say something to them." } else { "Answer what they just said." },
+        if last { "This is the last line of the talk: wrap it up." } else { "" }
+    )
+}
+
+/// The text of the first `"content"` of a chat-completions answer (the one of the message; `reasoning_content` is another key).
+fn llm_content(json: &str) -> Option<String> {
+    let rest = json.split("\"content\"").nth(1)?.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let (mut out, mut it) = (String::new(), rest.chars());
+    while let Some(c) = it.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match it.next()? {
+                'n' => out.push('\n'),
+                't' | 'r' => out.push(' '),
+                'u' => out.push(u32::from_str_radix(&it.by_ref().take(4).collect::<String>(), 16).ok().and_then(char::from_u32).unwrap_or(' ')),
+                c => out.push(c), // \" \\ \/
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// One chat line out of the model's text: the first line, plain ASCII (the client's font has no accents), starting with a letter or a digit
+/// (so it can never be a command or a party / guild line), 80 characters at most. Empty when nothing is left.
+fn chat_line(text: &str) -> String {
+    const FROM: &str = "áàäâéèëêíìïîóòöôúùüûñÁÉÍÓÚÑ";
+    const TO: &str = "aaaaeeeeiiiioooouuuunAEIOUN";
+    let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    // a model that puts the tone or the action on the same line: cut them off
+    let low = first.to_ascii_lowercase();
+    let first = ["tone:", "action:", "note:"].iter().filter_map(|k| low.find(k)).min().map_or(first, |i| first[..i].trim_end());
+    let s: String = first
+        .chars()
+        .filter_map(|c| match FROM.chars().position(|f| f == c) {
+            Some(i) => TO.chars().nth(i),
+            None => (c.is_ascii() && !c.is_ascii_control() && c != '"').then_some(c),
+        })
+        .collect();
+    s.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).chars().take(80).collect::<String>().trim_end().to_string()
+}
+
+/// The `NOTE:` the model wrote: a conclusion of its own, made plain like a chat line (`None` for "none" or nothing).
+fn llm_note(text: &str) -> Option<String> {
+    let l = text.to_ascii_lowercase();
+    let n = chat_line(&text[l.find("note:")? + 5..]);
+    (!n.is_empty() && !n.eq_ignore_ascii_case("none")).then_some(n)
+}
+
+/// The `TONE: cold|neutral|warm` the model wrote after its line: 0 cold, 1 neutral, 2 warm (`None` when it wrote none).
+fn llm_tone(text: &str) -> Option<u8> {
+    let l = text.to_ascii_lowercase();
+    let w = l[l.find("tone:")? + 5..].trim_start().to_string();
+    ["cold", "neutral", "warm"].iter().position(|t| w.starts_with(t)).map(|i| i as u8)
+}
+
+/// What `curl -K -` reads: the whole request as a config file, so that the API key never shows in the process list. Inside "..." curl wants the quotes
+/// and backslashes escaped (the JSON body has both).
+fn curl_config(url: &str, key: &str, body: &str) -> String {
+    let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut c = format!("url = {}\nheader = \"Content-Type: application/json\"\n", q(url));
+    if !key.is_empty() {
+        c += &format!("header = {}\n", q(&format!("Authorization: Bearer {key}")));
+    }
+    c + &format!("data = {}\n", q(body))
+}
+
+/// Asks the model (blocking: run it in `spawn_blocking`): `system` and what the player `said`; the model's text, `None` when anything fails.
+/// shortcut: HTTPS through the `curl` binary (hg has no TLS client); replace with an HTTP crate when streaming is needed.
+fn llm_ask(cfg: &BotCfg, system: &str, said: &str) -> Option<String> {
+    let raw = llm_post(cfg, "/v1/chat/completions", &llm_body(cfg, system, said), cfg.llm_ms / 1000)?;
+    let text = llm_content(&raw);
+    if text.is_none() && raw.contains("is unloaded") {
+        llm_reload(cfg);
+    }
+    text
+}
+
+/// LM Studio unloads the model now and then ("Model is unloaded."): the bots load it again, at most once every 2 minutes (a load takes ~30 s).
+/// Only on that answer: a slow or busy model that is loaded would get a second instance in memory. The canned lines carry the chat meanwhile.
+fn llm_reload(cfg: &BotCfg) {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = unix_ms();
+    if !cfg.llm_model.is_empty() && LAST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |t| (now.saturating_sub(t) >= 120_000).then_some(now)).is_ok() {
+        let _ = llm_post(cfg, "/api/v1/models/load", &format!("{{\"model\":{}}}", crate::bots_web::json_str(&cfg.llm_model)), 180);
+    }
+}
+
+fn llm_body(cfg: &BotCfg, system: &str, said: &str) -> String {
+    let model = if cfg.llm_model.is_empty() { String::new() } else { format!("\"model\":{},", crate::bots_web::json_str(&cfg.llm_model)) };
+    // reasoning_effort none: a thinking model would spend its few tokens on the thinking and say nothing
+    format!(
+        "{{{model}\"max_tokens\":120,\"temperature\":0.9,\"reasoning_effort\":\"none\",\"messages\":[{{\"role\":\"system\",\"content\":{}}},{{\"role\":\"user\",\"content\":{}}}]}}",
+        crate::bots_web::json_str(system),
+        crate::bots_web::json_str(said)
+    )
+}
+
+/// POSTs `body` to `cfg.llm_url + path` (blocking, `secs` at most), with the key; the answer's text, `None` when curl cannot start.
+fn llm_post(cfg: &BotCfg, path: &str, body: &str, secs: u32) -> Option<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("curl")
+        .args(["-sS", "-m", &secs.max(1).to_string(), "-K", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(curl_config(&format!("{}{path}", cfg.llm_url), &cfg.llm_key, body).as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn pick(bank: &[&'static str], r: i32) -> &'static str {
@@ -1798,6 +2187,7 @@ impl Game {
         let Some((d, foe, fpos)) = seen else { return false };
         if hp.0 * 100 >= hp.1 * 60 && (b.aggro >= 100 || self.dice(1, 100) <= b.aggro as _) {
             log(&format!("(bot) {}: meets a rival citizen (player {foe}) and attacks", b.ch));
+            b.remember(1, "", "met a citizen of the rival nation and attacked");
             (b.mode, b.raid_map, b.raid_target, b.raid_start, b.attacks, b.target, b.no_route_logged) = (Mode::Defend, m, foe, now, 0, 0, false);
             b.raid_ignore.clear();
             b.path.clear();
@@ -1839,10 +2229,14 @@ impl Game {
         let whisper = mode == 20;
         let map = String::from_utf8_lossy(&self.maps[li_map(self, listener)].name).to_string();
         self.bots_note_chat(&sname, if whisper { &lname } else { "" }, &text, false, &map);
-        let Some((english, kind)) = chat_kind(&text, text.to_lowercase().contains(&lname.to_lowercase()), whisper) else { return };
+        let Some((english, kind)) = chat_kind(&text, names_me(&self.bots.cfg, &text, &lname), whisper) else { return };
+        let english = self.bots.cfg.english(english);
         if self.bots.chat_q.iter().any(|q| q.0 == n) {
             return;
         }
+        self.bots.list[n].hear(&sname, &text);
+        self.bots.list[n].remember(0, &sname, &format!("{sname}: {text}"));
+        self.bots.list[n].last_with = sname.clone();
         let r = self.dice(1, 1000);
         let now_ms = unix_ms();
         let before = {
@@ -1872,7 +2266,301 @@ impl Game {
         };
         let now = self.now();
         let delay = [4000, 2000, 1000][self.bots.list[n].pace] + self.dice(1, 3500) as u32; // the slow ones take longer to type
-        self.bots.chat_q.push((n, whisper.then_some(sname), line.unwrap_or_else(|| pick(bank, r).to_string()), now.wrapping_add(delay)));
+        let to = whisper.then(|| sname.clone());
+        let mut extra = llm_lang_hint(self.bots.cfg.language).to_string() + &self.rival_hint(&lname, &sname);
+        if !self.bots.cfg.llm_url.is_empty() {
+            extra += &self.bot_around(listener, &self.bots.list[n]);
+            extra += &self.bots.list[n].history_hint(&sname);
+        }
+        let due = self
+            .bot_llm(n, to.clone(), sname.clone(), self.bots.cfg.llm_parallel, now, |bs| (llm_system(&bs.list[n], level, &map, &before, now_ms, &extra), format!("{sname}: {}", text.chars().take(200).collect::<String>())))
+            .unwrap_or(now.wrapping_add(delay));
+        self.bots.chat_q.push((n, to, line.unwrap_or_else(|| pick(bank, r).to_string()), due));
+    }
+
+    /// Asks the model for the line bot `n` is about to queue (to `to`: a whisper), when an LLM is configured and fewer than `limit` requests wait;
+    /// `prompt` gives the system text and what was said. Returns when the canned line queued meanwhile is due: it waits for the model and is said
+    /// at once when the request fails (`bots_llm_said`). `None`: no request, the caller uses its own delay.
+    fn bot_llm(&mut self, n: usize, to: Option<String>, with: String, limit: usize, now: u32, prompt: impl FnOnce(&Bots) -> (String, String)) -> Option<u32> {
+        let cfg = Arc::clone(&self.bots.cfg);
+        if cfg.llm_url.is_empty() {
+            return None;
+        }
+        if self.bots.llm_busy >= limit {
+            self.bots.llm_canned += 1;
+            return None;
+        }
+        let ev = self.bots.ev.clone()?;
+        let (system, said) = prompt(&self.bots);
+        self.bots.llm_busy += 1;
+        let due = now.wrapping_add(cfg.llm_ms + 2000);
+        tokio::spawn(async move {
+            let raw = tokio::task::spawn_blocking(move || llm_ask(&cfg, &system, &said)).await.ok().flatten().unwrap_or_default();
+            let _ = ev.send(Ev::BotLlm { n, to, with, text: chat_line(&raw), tone: llm_tone(&raw), act: llm_action(&raw), note: llm_note(&raw) }).await;
+        });
+        Some(due)
+    }
+
+    /// The model's line for bot `n` is ready (`text` empty: the request failed). It replaces the canned line that waits in the queue and is said
+    /// after a moment of typing; on a failure the canned line is said now.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bots_llm_said(&mut self, n: usize, to: Option<String>, with: String, text: String, tone: Option<u8>, act: Option<Act>, note: Option<String>) {
+        self.bots.llm_busy = self.bots.llm_busy.saturating_sub(1);
+        // a deduction of its own goes into its history (and from there to the Login)
+        if let (Some(nt), false, Some(b)) = (note, text.is_empty(), self.bots.list.get_mut(n)) {
+            b.remember(2, &with, &nt);
+        }
+        // the action goes with a line that is still waiting to be said (the bot may have logged off meanwhile); `bot_act` checks it when it thinks
+        if let (Some(a), false, true) = (act, text.is_empty(), self.bots.chat_q.iter().any(|q| q.0 == n && q.1 == to)) {
+            let until = self.now().wrapping_add(60_000);
+            if let Some(b) = self.bots.list.get_mut(n) {
+                b.act = Some((a, with.clone(), until));
+            }
+        }
+        if text.is_empty() {
+            self.bots.llm_fail += 1;
+            log(&format!("(!) bots llm: no answer for bot {n}, its canned line goes"));
+        } else if let (Some(t), Some(b)) = (tone, self.bots.list.get_mut(n)) {
+            // what the model made it say moves what it feels about the other one (cold -4, neutral +1, warm +3), and the other one hears that tone
+            b.feel(&with, [-4, 1, 3][t.min(2) as usize], unix_ms());
+            if let Some(tk) = self.bots.talks.iter_mut().find(|k| (k.a == n || k.b == n) && k.turn != n) {
+                tk.tone = t;
+            }
+        }
+        self.bots.llm_ok += !text.is_empty() as u32;
+        let due = self.now().wrapping_add(if text.is_empty() { 0 } else { 500 + self.dice(1, 1000) as u32 });
+        if let Some(q) = self.bots.chat_q.iter_mut().find(|q| q.0 == n && q.1 == to) {
+            if !text.is_empty() {
+                q.2 = text;
+            }
+            q.3 = due;
+        }
+    }
+
+    /// For the model: a line saying so when characters `a` and `b` are citizens of rival nations ("" when not, or when one is not in the game).
+    fn rival_hint(&self, a: &str, b: &str) -> String {
+        let side = |name: &str| self.handles().into_iter().find_map(|i| self.clients[i].as_ref().filter(|c| crate::util::cstr(&c.char_name) == name.as_bytes() && !c.is_neutral()).map(|c| c.side));
+        match (side(a), side(b)) {
+            (Some(x), Some(y)) if x != y => "This player is a citizen of the rival nation, an enemy of yours: rivalry, mockery or tension fits. ".to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// For the model: what the bot really has around it (monsters within 12 tiles, characters, its health, its nation, what it killed last), so that it
+    /// does not invent enemies or places. Ends with a space.
+    fn bot_around(&self, h: usize, b: &Bot) -> String {
+        let Some(c) = self.clients[h].as_ref() else { return String::new() };
+        let (pos, m) = ((c.x, c.y), c.map_index);
+        let nation = |o: &Client| if o.is_neutral() { "traveller" } else if o.side == ARESDEN { "Aresden" } else { "Elvine" };
+        let mut mons: Vec<(String, u32)> = Vec::new();
+        for n in self.npcs.iter().flatten().filter(|n| n.map_index == m && !n.is_killed && n.hp > 0 && n.side >= SIDE_HOSTILE && cheb(pos, (n.x, n.y)) <= 12) {
+            let name = monster_name(&String::from_utf8_lossy(crate::util::cstr(&n.npc_name)));
+            match mons.iter_mut().find(|e| e.0 == name) {
+                Some(e) => e.1 += 1,
+                None => mons.push((name, 1)),
+            }
+        }
+        let mons = if mons.is_empty() { "none".to_string() } else { mons.iter().take(6).map(|(n, k)| format!("{n} x{k}")).collect::<Vec<_>>().join(", ") };
+        let people: Vec<String> = self
+            .handles()
+            .into_iter()
+            .filter(|&j| j != h)
+            .filter_map(|j| {
+                let o = self.clients[j].as_ref().filter(|o| o.map_index == m && !o.is_killed && cheb(pos, (o.x, o.y)) <= 12)?;
+                Some(format!("{} (level {}, {})", String::from_utf8_lossy(crate::util::cstr(&o.char_name)), o.level, nation(o)))
+            })
+            .take(6)
+            .collect();
+        let last = if b.last_prey.is_empty() { String::new() } else { format!("The last monster you killed was a {} ({} kills this session). ", monster_name(&b.last_prey), b.kills) };
+        // what was said nearby lately (not to be repeated) and an idea of what to talk about, which changes with the bot and the time
+        let map_name = String::from_utf8_lossy(&self.maps[m].name).to_string();
+        let said: Vec<String> = self.bots.chat_log.iter().rev().filter(|l| l.map == map_name).take(4).map(|l| format!("{}: {}", l.from, l.text)).collect();
+        const TOPICS: [&str; 8] = ["how your hunting is going", "your level and your gear", "the gold you carry or what to buy", "the war between Aresden and Elvine", "your guild or your party", "the monsters around you", "a plan to hunt together", "a joke"];
+        let topic = TOPICS[((unix_ms() / 7919) as usize + b.n * 3) % TOPICS.len()];
+        let guild = crate::util::cstr(&c.guild_name);
+        format!(
+            "What you really see around you right now: monsters: {mons}; other players: {}. You are at {}% health, a {} citizen. {last}\
+             You carry {} gold, have killed {} monsters and died {} times this session; guild: {}; {}. \
+             Mention only what is listed here and never invent monsters, enemies, places or events (aresden and elvine are cities, not creatures). \
+             Monsters are listed as \"Spanish name (game name)\": when you write Spanish use the Spanish name, as it is written, and never translate or shorten it yourself. \
+             Lines said nearby lately, whose wording you must not repeat: {}. If you have nothing to answer, a topic idea: {topic}. ",
+            if people.is_empty() { "nobody".to_string() } else { people.join(", ") },
+            c.hp * 100 / c.get_max_hp().max(1),
+            nation(c),
+            self.item_count(h, b"Gold").1,
+            b.kills,
+            b.deaths,
+            if guild.is_empty() || guild.starts_with(b"NONE") { "none".to_string() } else { String::from_utf8_lossy(guild).to_string() },
+            if c.party_id != 0 { "you are in a party" } else { "you are not in a party" },
+            if said.is_empty() { "none".to_string() } else { said.join(" | ") }
+        )
+    }
+
+    /// What a talk made the bot commit to (`Act`): done within 25 s, while it hunts, rests or travels, with the checks that keep a chat line from
+    /// forcing anything (only rivals are fought, only bots get gold, a cool-down). Every outcome is logged.
+    fn bot_act(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), hp: (i32, i32), now: u32) {
+        let Some((act, who, until)) = b.act.clone() else { return };
+        if now.wrapping_sub(until) as i32 > 0 {
+            b.act = None;
+            log(&format!("(bot) {}: llm action {act:?} with {who} dropped: too late", b.ch));
+        } else if matches!(b.mode, Mode::Hunt | Mode::Rest | Mode::Travel) {
+            b.act = None;
+            match self.bot_act_do(h, b, cfg, at, hp, act, &who, now) {
+                Ok(what) => {
+                    log(&format!("(bot) {}: llm action {act:?} with {who}: {what}", b.ch));
+                    b.remember(1, &who, &format!("{act:?} with {who}: {what}"));
+                }
+                // an invitation waits until it is hunting again (it expires after a minute)
+                Err("not hunting") if act == Act::Party => b.act = Some((act, who, until)),
+                Err(why) => log(&format!("(bot) {}: llm action {act:?} with {who} rejected: {why}", b.ch)),
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bot_act_do(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, at: ((i16, i16), usize), hp: (i32, i32), act: Act, who: &str, now: u32) -> Result<&'static str, &'static str> {
+        if b.last_act != 0 && now.wrapping_sub(b.last_act) < 30_000 {
+            return Err("cool-down");
+        }
+        let (pos, m) = at;
+        let c = self.clients[h].as_ref().ok_or("offline")?;
+        let (side, neutral) = (c.side, c.is_neutral());
+        if act == Act::Fish {
+            // the same trip its own clock would make (rod, skill and live fish needed), now
+            if b.hobby != 1 {
+                return Err("it is not fond of fishing");
+            }
+            b.next_fish = now.wrapping_sub(1000).max(1);
+            if !self.bot_maybe_fish(h, b, cfg, at, now) {
+                return Err("no rod, skill or fish to go for");
+            }
+            b.last_act = now.max(1);
+            return Ok("goes fishing");
+        }
+        if act == Act::Leave {
+            // time for another hunting map
+            let max_dice = self.bot_max_dice(h, cfg);
+            if !self.bot_roam_to(b, at, max_dice, false, true) {
+                return Err("no other map to hunt in");
+            }
+            b.last_act = now.max(1);
+            return Ok("goes hunting on another map");
+        }
+        if act == Act::Find {
+            // to where the most other characters are
+            let mut counts = vec![0u32; self.maps.len()];
+            for o in self.handles().into_iter().filter(|&j| j != h).filter_map(|j| self.clients[j].as_ref()).filter(|o| !o.is_killed) {
+                counts[o.map_index] += 1;
+            }
+            let (best, k) = counts.iter().enumerate().filter(|&(d, _)| d != m).map(|(d, &k)| (d, k)).max_by_key(|&(d, k)| (k, Reverse(d))).ok_or("no other map")?;
+            if k <= counts[m] {
+                return Err("the people are here");
+            }
+            let o = self.handles().into_iter().filter(|&j| j != h).filter_map(|j| self.clients[j].as_ref()).find(|o| o.map_index == best && !o.is_killed).ok_or("nobody there")?;
+            go_to(b, best, (o.x, o.y));
+            b.last_act = now.max(1);
+            return Ok("goes where most people are");
+        }
+        let j = self.bot_handle(who).ok_or("it is not here")?;
+        let o = self.clients[j].as_ref().ok_or("it is not here")?;
+        let (om, opos, oside, oneutral) = (o.map_index, (o.x, o.y), o.side, o.is_neutral());
+        if o.is_killed || o.hp <= 0 {
+            return Err("it is down");
+        }
+        match act {
+            Act::Party | Act::Follow => match (act, self.bot_party_with(h, b, cfg, j, who, now)) {
+                (_, Ok(())) => {
+                    b.last_act = now.max(1);
+                    Ok("invites it to a party")
+                }
+                (Act::Follow, Err(_)) => {
+                    go_to(b, om, opos);
+                    b.last_act = now.max(1);
+                    Ok("walks to where it is")
+                }
+                (_, Err(e)) => Err(e),
+            },
+            Act::Fight => {
+                if !cfg.pvp {
+                    return Err("pvp is off");
+                }
+                if b.aggro == 0 {
+                    return Err("it is peaceful");
+                }
+                if neutral || oneutral || side == oside {
+                    return Err("not a rival citizen");
+                }
+                if om != m || !self.maps[m].is_attack_enabled {
+                    return Err("no fighting here");
+                }
+                if hp.0 * 100 < hp.1 * 60 {
+                    return Err("it is hurt");
+                }
+                (b.mode, b.raid_map, b.raid_target, b.raid_start, b.attacks, b.target, b.no_route_logged) = (Mode::Defend, m, j, now, 0, 0, false);
+                b.raid_ignore.clear();
+                b.path.clear();
+                b.last_act = now.max(1);
+                Ok("attacks it")
+            }
+            Act::Give => {
+                if !cfg.gift {
+                    return Err("gifts are off");
+                }
+                if !cfg.is_bot(who.as_bytes()) {
+                    return Err("only bots get gold");
+                }
+                if b.last_gift != 0 && now.wrapping_sub(b.last_gift) < 600_000 {
+                    return Err("it gave some lately");
+                }
+                let (slot, gold) = self.item_count(h, b"Gold");
+                let slot = slot.filter(|_| gold >= 1500).ok_or("not enough gold")?;
+                if om != m || cheb(pos, opos) > 3 {
+                    return Err("too far to hand it over");
+                }
+                (b.last_gift, b.last_act) = (now, now.max(1));
+                self.give_gold(h, pos, slot, j, opos, (gold / 10).min(2000));
+                Ok("hands it some gold")
+            }
+            Act::Find | Act::Leave | Act::Fish => Err("it needs nobody"),
+        }
+    }
+
+    /// An invitation to a party for `who` (character handle `j`), as `bot_party` sends it (it must be hunting, free, and the other one free or with room, on
+    /// its map and side within 20 tiles).
+    fn bot_party_with(&mut self, h: usize, b: &mut Bot, cfg: &BotCfg, j: usize, who: &str, now: u32) -> Result<(), &'static str> {
+        if !cfg.party {
+            return Err("parties are off");
+        }
+        if b.mode != Mode::Hunt {
+            return Err("not hunting");
+        }
+        let c = self.clients[h].as_ref().ok_or("offline")?;
+        if c.party_id != 0 || c.party_status != PARTYSTATUS_NULL {
+            return Err("already in a party");
+        }
+        let (pos, m, side) = ((c.x, c.y), c.map_index, c.side);
+        let o = self.clients[j].as_ref().ok_or("it is not here")?;
+        let free = o.party_status == PARTYSTATUS_NULL && o.party_id == 0;
+        let room = o.party_status == PARTYSTATUS_CONFIRM && self.party_members(o.party_id).len() < MAXPARTYMEMBERS as usize;
+        if o.map_index != m || o.side != side || o.is_killed || cheb(pos, (o.x, o.y)) > 20 || !(free || room) {
+            return Err("it cannot join one now");
+        }
+        b.invite = Some((who.to_string(), now, false));
+        b.last_invite = now;
+        self.bots.peace.push((who.to_string(), now.wrapping_add(10_000)));
+        Ok(())
+    }
+
+    /// Gold from bag slot `slot` of `h` to character `j` standing at `o`.
+    fn give_gold(&mut self, h: usize, pos: (i16, i16), slot: usize, j: usize, o: (i16, i16), amount: u32) {
+        let mut f = common(COMMONTYPE_GIVEITEMTOCHAR, pos, amount);
+        let mut w = W(&mut f);
+        w.u8(10, slot as u8);
+        w.u32(15, o.0 as u32);
+        w.u32(19, o.1 as u32);
+        w.bytes(23, b"Gold");
+        w.u16(53, j as u16);
+        self.bot_send(h, f);
     }
 
     /// Bot `n` heard bot `from` say `text`: when it is the line its talk waits for, it feels something about `from` (warm +2, neutral +1, cold -3)
@@ -1880,9 +2568,26 @@ impl Game {
     fn bot_hears_bot(&mut self, from: &str, n: usize, text: &str, map: &str, level: i32) {
         let Some(s) = self.bots.list.iter().position(|b| b.ch == from) else { return };
         let now = self.now();
-        let Some(ti) = self.bots.talks.iter().position(|t| t.turn == n && (if t.a == n { t.b } else { t.a }) == s && now.wrapping_sub(t.until) as i32 <= 0) else { return };
+        let ti = match self.bots.talks.iter().position(|t| t.turn == n && (if t.a == n { t.b } else { t.a }) == s && now.wrapping_sub(t.until) as i32 <= 0) {
+            Some(ti) => ti,
+            None => {
+                // no talk between them, but the line calls this bot by its name or a shortening of it: it answers, and a talk starts (within the usual caps)
+                let cfg = Arc::clone(&self.bots.cfg);
+                let busy = |g: &Game, x: usize| g.bots.talks.iter().any(|t| t.a == x || t.b == x) || g.bots.chat_q.iter().any(|q| q.0 == x);
+                let started = self.bots.talks.iter().filter(|t| now.wrapping_sub(t.started) < 60_000).count() as u32;
+                if !names_me(&cfg, text, &self.bots.list[n].ch) || busy(self, n) || busy(self, s) || started >= cfg.chat_bots_per_min {
+                    return;
+                }
+                let en = cfg.english(chat_kind(text, true, false).is_some_and(|k| k.0));
+                self.bots.talks.push(Talk { a: s, b: n, turn: n, depth: 1, en, tone: 1, started: now, until: now.wrapping_add(40_000) });
+                self.bots.talks.len() - 1
+            }
+        };
         let (depth, en, heard_tone) = (self.bots.talks[ti].depth, self.bots.talks[ti].en, self.bots.talks[ti].tone);
         self.bots.list[n].feel(from, [-3, 1, 2][heard_tone.min(2) as usize], unix_ms());
+        self.bots.list[n].hear(from, text);
+        self.bots.list[n].remember(0, from, &format!("{from}: {text}"));
+        self.bots.list[n].last_with = from.to_string();
         if depth >= 3 || self.bots.chat_q.iter().any(|q| q.0 == n) {
             self.bots.talks.remove(ti);
             return;
@@ -1893,7 +2598,17 @@ impl Game {
         let r = self.dice(1, 1000);
         let line = bot_reply(depth, kind, tone, en, mode, level, map, from, text, r);
         let delay = [4000, 2000, 1000][pace.min(2)] + self.dice(1, 3500) as u32;
-        self.bots.chat_q.push((n, None, line, now.wrapping_add(delay)));
+        let mut rival = self.rival_hint(&self.bots.list[n].ch, from);
+        if !self.bots.cfg.llm_url.is_empty() {
+            rival += &self.bot_handle(&self.bots.list[n].ch.clone()).map_or(String::new(), |h| self.bot_around(h, &self.bots.list[n]));
+            rival += &self.bots.list[n].history_hint(from);
+        }
+        let due = self
+            .bot_llm(n, None, from.to_string(), self.bots.cfg.llm_for_bots(), now, |bs| {
+                (llm_system(&bs.list[n], level, map, &Mem::default(), unix_ms(), &llm_talk_hint(en, tone, false, depth >= 2, &rival)), format!("{from}: {}", text.chars().take(200).collect::<String>()))
+            })
+            .unwrap_or(now.wrapping_add(delay));
+        self.bots.chat_q.push((n, None, line, due));
         let t = &mut self.bots.talks[ti];
         (t.turn, t.depth, t.tone, t.until) = (s, depth + 1, tone, now.wrapping_add(40_000));
     }
@@ -1916,7 +2631,7 @@ impl Game {
             return;
         }
         let Some(c) = self.clients[h].as_ref() else { return };
-        let (pos, m) = ((c.x, c.y), c.map_index);
+        let (pos, m, level) = ((c.x, c.y), c.map_index, c.level);
         let near: Vec<(usize, String)> = self
             .handles()
             .into_iter()
@@ -1935,12 +2650,25 @@ impl Game {
                 continue;
             }
             let (en, r, tone) = (self.dice(1, 2) == 2, self.dice(1, 1000), tone_of(aff));
+            let en = cfg.english(en);
             let bank = if en { &OPEN_EN[tone as usize] } else { &OPEN_ES[tone as usize] };
             let line = pick(bank, r).replace("{}", &name);
             let delay = [3000, 1500, 800][b.pace.min(2)] + self.dice(1, 2500) as u32;
-            self.bots.chat_q.push((b.n, None, line, now.wrapping_add(delay)));
+            let mut rival = self.rival_hint(&b.ch, &name);
+            if !cfg.llm_url.is_empty() {
+                rival += &self.bot_around(h, b);
+                rival += &b.history_hint(&name);
+            }
+            let map = String::from_utf8_lossy(&self.maps[m].name).to_string();
+            let due = self
+                .bot_llm(b.n, None, name.clone(), cfg.llm_for_bots(), now, |_| {
+                    (llm_system(b, level, &map, &Mem::default(), unix_ms(), &llm_talk_hint(en, tone, true, false, &rival)), format!("(you start a talk with {name}: say something to them)"))
+                })
+                .unwrap_or(now.wrapping_add(delay));
+            self.bots.chat_q.push((b.n, None, line, due));
             self.bots.talks.push(Talk { a: b.n, b: i, turn: i, depth: 1, en, tone, started: now, until: now.wrapping_add(40_000) });
             b.last_bchat = now;
+            b.last_with = name.clone();
             if aff < 0 {
                 b.feel(&name, 1, unix_ms()); // time heals a little
             }
@@ -1999,6 +2727,8 @@ impl Game {
                     let last = self.bots.list[n].last_chat;
                     if now.wrapping_sub(last) > 6000 {
                         self.bots.list[n].last_chat = now;
+                        let with = to.clone().unwrap_or_else(|| self.bots.list[n].last_with.clone());
+                        self.bots.list[n].remember(0, &with, &format!("me: {text}"));
                         log(&format!("(bot) {ch}: says{} '{text}'", to.as_ref().map_or(String::new(), |t| format!(" to {t}"))));
                         self.bot_say(h, to.as_deref(), &text);
                     } else {
@@ -2065,9 +2795,58 @@ impl Game {
         }
     }
 
+    /// Asks the Login for the history of the bot (once, like the memory): the answer is `bots_history_loaded`.
+    fn bot_hist_load(&mut self, b: &Bot) {
+        if b.hist_synced {
+            return;
+        }
+        let mut f = vec![0u8; 16];
+        W(&mut f).u32(0, MSGID_REQUEST_BOTHIST);
+        W(&mut f).bytes(6, &Self::name10(b.ch.as_bytes()));
+        self.send_ls_raw(&f);
+    }
+
+    /// MSGID_RESPONSE_BOTHIST: the name at 6, the stored rows (hex, oldest first, maybe none) from 16. They go before what the bot has lived since it started.
+    pub fn bots_history_loaded(&mut self, d: &[u8]) {
+        let r = Rd::new(d);
+        let name = String::from_utf8_lossy(crate::util::cstr(&r.raw(6, 10))).to_string();
+        let loaded = hist_decode(crate::util::cstr(&r.raw(16, d.len().saturating_sub(16))));
+        if let Some(b) = self.bots.list.iter_mut().find(|b| b.ch == name) {
+            b.hist.splice(0..0, loaded);
+            let extra = b.hist.len().saturating_sub(HIST_RAM);
+            b.hist.drain(..extra);
+            b.hist_synced = true;
+        }
+    }
+
+    /// Sends the rows the Login does not have yet (as many as fit in a frame): at most every `MEM_SAVE_MS`, or at once (`force`: it is logging off).
+    fn bot_hist_save(&mut self, b: &mut Bot, now: u32, force: bool) {
+        if b.hist_new.is_empty() || (!force && now.wrapping_sub(b.hist_saved) < MEM_SAVE_MS) {
+            return;
+        }
+        let (mut take, mut size) = (0, 0);
+        for h in &b.hist_new {
+            size += h.text.len() + h.other.len() + 30;
+            if size > 7000 {
+                break;
+            }
+            take += 1;
+        }
+        let data = hist_encode(&b.hist_new[..take]);
+        let mut f = vec![0u8; 16 + data.len() + 1];
+        W(&mut f).u32(0, MSGID_BOTHIST_SAVE);
+        W(&mut f).bytes(6, &Self::name10(b.ch.as_bytes()));
+        W(&mut f).bytes(16, data.as_bytes());
+        if self.send_ls_raw(&f) {
+            b.hist_new.drain(..take);
+            b.hist_saved = now;
+        }
+    }
+
     /// Sends the memory to the Login when it changed: at most every `MEM_SAVE_MS`, or at once (`force`: it is logging off), and only
-    /// after the Login's answer to the load, so that what it holds is never overwritten by less.
+    /// after the Login's answer to the load, so that what it holds is never overwritten by less. The history goes with it.
     fn bot_mem_save(&mut self, b: &mut Bot, now: u32, force: bool) {
+        self.bot_hist_save(b, now, force);
         if !b.mem_dirty || !b.mem_synced || (!force && now.wrapping_sub(b.mem_saved) < MEM_SAVE_MS) {
             return;
         }
@@ -2094,10 +2873,11 @@ impl Game {
 
     /// The language to use with `name`: the one they last wrote in, else a coin.
     fn lang_of(&mut self, b: &Bot, name: &str) -> bool {
-        match b.mem.iter().find(|m| m.name == name).and_then(|m| m.en) {
+        let en = match b.mem.iter().find(|m| m.name == name).and_then(|m| m.en) {
             Some(en) => en,
             None => self.dice(1, 2) == 2,
-        }
+        };
+        self.bots.cfg.english(en)
     }
 
     /// A remark about what has just happened to it, for a player nearby: `up` = the level it has just reached (0 = none), or
@@ -2279,7 +3059,7 @@ impl Game {
         }
         let n = online.max(1) as i64;
         format!(
-            "(bots) {online}/{} connected{}: hunting {}, resting {}, travelling {}, shopping {}, enlisting {}, raiding {}, on quests {}, defending {}, fishing {} | level {}-{} (avg {}) | {kills} kills, {deaths} deaths | {} gold each on average",
+            "(bots) {online}/{} connected{}: hunting {}, resting {}, travelling {}, shopping {}, enlisting {}, raiding {}, on quests {}, defending {}, fishing {} | level {}-{} (avg {}) | {kills} kills, {deaths} deaths | {} gold each on average{}",
             self.bots.list.len(),
             if self.bots.paused || self.bots.cfg.paused { " (paused)" } else { "" },
             modes[0],
@@ -2294,7 +3074,8 @@ impl Game {
             if online > 0 { lv_min } else { 0 },
             lv_max,
             lv_sum / n,
-            gold / n
+            gold / n,
+            if self.bots.cfg.llm_url.is_empty() { String::new() } else { format!(" | chat: {} lines by the model, {} failed, {} canned (model busy)", self.bots.llm_ok, self.bots.llm_fail, self.bots.llm_canned) }
         )
     }
 
@@ -2369,6 +3150,7 @@ impl Game {
             // just connected: it starts afresh where the game put it (a first session is cut short at random so that they do not all leave at once)
             b.online = true;
             self.bot_mem_load(b);
+            self.bot_hist_load(b);
             b.sess = (self.clients[h].as_ref().map_or(0, |c| c.exp), unix_ms(), b.kills, b.deaths);
             (b.mode, b.target, b.home, b.wander, b.idle_since, b.invite) = (Mode::Hunt, 0, None, None, None, None);
             b.path.clear();
@@ -2398,6 +3180,7 @@ impl Game {
                 self.bot_send(h, f);
                 b.deaths += 1;
                 log(&format!("(bot) {} died, restarting", b.ch));
+                b.remember(1, "", "died and came back");
             }
             (b.mode, b.target) = (Mode::Rest, 0);
             b.path.clear();
@@ -2413,6 +3196,7 @@ impl Game {
             log(&format!("(bot) {}: level {} ({} exp, {})", b.ch, c.level, c.exp, if c.is_neutral() { "neutral" } else { "citizen" }));
             if b.last_level != 0 && c.level > b.last_level {
                 up = c.level;
+                b.remember(1, "", &format!("reached level {}", c.level));
             }
             b.last_level = c.level;
         }
@@ -2436,6 +3220,7 @@ impl Game {
             b.last_report = now;
             log(&format!("(bot) {}: {:?} {}({},{}) hp {hp}/{max_hp} target {} kills {}", b.ch, b.mode, String::from_utf8_lossy(&self.maps[m].name), pos.0, pos.1, b.target, b.kills));
         }
+        self.bot_act(h, b, &cfg, (pos, m), (hp, max_hp), now);
         self.bot_party(h, b, &cfg, now);
         self.bot_gift(h, b, &cfg, now);
         self.bot_guild(h, b, &cfg, now);
@@ -2600,6 +3385,7 @@ impl Game {
                 b.invite = None;
             } else if !sent && peaceful == Some(true) {
                 log(&format!("(bot) {}: invites {name} to a party", b.ch));
+                b.remember(1, &name, &format!("invited {name} to a party"));
                 b.invite = Some((name.clone(), start, true));
                 let mut f = common(COMMONTYPE_REQUEST_JOINPARTY, pos, 1);
                 W(&mut f).bytes(23, name.as_bytes());
@@ -2682,6 +3468,7 @@ impl Game {
             let names: [&str; 3] = if side == ARESDEN { ["Vanguard", "Ironwall", "Dawnblades"] } else { ["Silverleaf", "Moonguard", "Wolfpack"] };
             let name = names[(b.n) % 3];
             log(&format!("(bot) {}: founds the guild {name}", b.ch));
+            b.remember(1, "", &format!("founded the guild {name}"));
             let mut f = vec![0u8; 57];
             W(&mut f).u32(0, MSGID_REQUEST_CREATENEWGUILD);
             W(&mut f).bytes(36, name.as_bytes());
@@ -2989,6 +3776,7 @@ impl Game {
                 }
                 if done {
                     log(&format!("(bot) {}: quest done, back to town for the reward", b.ch));
+                    b.remember(1, "", "finished a hunting quest, back to town for the reward");
                     (b.qphase, b.quest_asks, b.quest_type) = (3, 0, 0);
                     return;
                 }
@@ -3005,6 +3793,7 @@ impl Game {
                     return;
                 }
                 if b.quest_type != q.target_type {
+                    b.remember(1, "", &format!("took quest {quest}: kill {} monsters of type {}", q.max_count, q.target_type));
                     log(&format!("(bot) {}: quest {quest}: kill {} of type {} on {} ({} of them alive there)", b.ch, q.max_count, q.target_type, String::from_utf8_lossy(crate::util::cstr(&q.target_name)), self.npcs.iter().flatten().filter(|n| Some(n.map_index) == target_map && n.type_ as i32 == q.target_type && !n.is_killed).count()));
                 }
                 b.quest_type = q.target_type;
@@ -3071,6 +3860,7 @@ impl Game {
         }
         let d = if with_players[m] { Some(m) } else { self.bot_route(m, &|d| with_players[d], pos).or_else(|| self.bot_route(m, &|d| foe[d], pos)).map(|r| r.1) };
         let Some(d) = d else { return false };
+        b.remember(1, "", &format!("went on a raid on {}", String::from_utf8_lossy(&self.maps[d].name)));
         log(&format!("(bot) {}: raid on {} ({} players of the rival nation there)", b.ch, String::from_utf8_lossy(&self.maps[d].name), self.handles().iter().filter(|&&j| self.clients[j].as_ref().is_some_and(|o| o.side == enemy && o.map_index == d)).count()));
         (b.mode, b.last_raid, b.raid_start, b.raid_map, b.raid_target, b.raid_kills, b.target, b.no_route_logged) = (Mode::Raid, now, now, d, 0, 0, 0, false);
         (b.attacks, b.raid_ignore) = (0, Vec::new());
@@ -3236,6 +4026,9 @@ impl Game {
         // the target that went down: count it
         if b.target != 0 && self.bot_prey(b.target, m).is_none() {
             if b.attacks > 0 {
+                if let Some(nm) = self.npcs.get(b.target).and_then(|x| x.as_ref()).map(|x| String::from_utf8_lossy(crate::util::cstr(&x.npc_name)).to_string()) {
+                    b.last_prey = nm;
+                }
                 b.kills += 1;
                 log(&format!("(bot) {}: target down ({} kills, {} hits sent)", b.ch, b.kills, b.attacks));
             }
@@ -3514,14 +4307,7 @@ impl Game {
         let amount = (gold / 10).min(4000);
         let (o, name) = self.clients[j].as_ref().map(|o| ((o.x, o.y), String::from_utf8_lossy(crate::util::cstr(&o.char_name)).to_string())).unwrap();
         log(&format!("(bot) {}: gives {amount} gold to its poor party mate {name}", b.ch));
-        let mut f = common(COMMONTYPE_GIVEITEMTOCHAR, pos, amount);
-        let mut w = W(&mut f);
-        w.u8(10, slot as u8);
-        w.u32(15, o.0 as u32);
-        w.u32(19, o.1 as u32);
-        w.bytes(23, b"Gold");
-        w.u16(53, j as u16);
-        self.bot_send(h, f);
+        self.give_gold(h, pos, slot, j, o, amount);
         true
     }
 
@@ -3668,6 +4454,7 @@ impl Game {
         let Some(city) = b.city else { return };
         let neutral = self.clients[h].as_ref().is_none_or(|c| c.is_neutral());
         if !neutral {
+            b.remember(1, "", "became a citizen of a nation");
             log(&format!("(bot) {}: enlisted ({})", b.ch, self.clients[h].as_ref().map_or(String::new(), |c| String::from_utf8_lossy(crate::util::cstr(&c.location)).to_string())));
             (b.mode, b.home, b.wander, b.idle_since, b.ground_dice, b.target) = (Mode::Hunt, Some((m, pos)), None, None, 0, 0);
             b.path.clear();
@@ -4228,6 +5015,68 @@ mod tests {
     }
 
     #[test]
+    fn the_model_answer_is_read_and_made_safe_to_say() {
+        let a = r#"{"choices":[{"message":{"role":"assistant","content":"Bien, matando \"mobs\" á\nsegunda","reasoning_content":"x"}}]}"#;
+        assert_eq!(llm_content(a).unwrap(), "Bien, matando \"mobs\" \u{e1}\nsegunda");
+        assert_eq!(llm_content(r#"{"message":{"content":"","reasoning_content":"abc"}}"#).unwrap(), "");
+        assert!(llm_content(r#"{"error":"no model"}"#).is_none());
+        assert_eq!(chat_line("\"Qu\u{e9} tal, se\u{f1}or!\"\nsecond line"), "Que tal, senor!");
+        assert_eq!(chat_line("/shutdown now"), "shutdown now", "no command, party or guild prefix survives");
+        assert_eq!(chat_line("$ hola"), "hola");
+        assert_eq!(chat_line("\u{bf}\u{bf}"), "");
+        assert_eq!(chat_line(&"a".repeat(200)).len(), 80);
+        // the line and its tone, on two lines or on one
+        assert_eq!((chat_line("hola crack\nTONE: warm"), llm_tone("hola crack\nTONE: warm")), ("hola crack".to_string(), Some(2)));
+        assert_eq!((chat_line("ni me hables TONE: cold"), llm_tone("ni me hables TONE: cold")), ("ni me hables".to_string(), Some(0)));
+        assert_eq!((llm_tone("ok\ntone: Neutral."), llm_tone("ok"), llm_tone("ok\nTONE: angry")), (Some(1), None, None));
+    }
+
+    #[test]
+    fn language_is_forced_or_detected_and_the_model_hears_what_others_said() {
+        let (es, w) = BotCfg::parse("language = es");
+        assert!(w.is_empty() && !es.english(true) && !es.english(false));
+        assert!(BotCfg::parse("language = EN").0.english(false) && BotCfg::default().english(true) && !BotCfg::default().english(false));
+        assert_eq!(BotCfg::parse("language = fr").1.len(), 1);
+        let mut b = Bot::made(&es, 1);
+        for i in 0..6 {
+            b.hear("Bot02", &format!("news {i}"));
+        }
+        assert_eq!(b.heard.len(), 4);
+        let s = llm_system(&b, 10, "aresden", &Mem::default(), 0, "");
+        assert!(s.contains("Bot02: news 5") && !s.contains("news 1") && s.contains("TONE:"), "{s}");
+    }
+
+    /// Against a real server: `HG_LLM_URL=https://host [HG_LLM_MODEL=m] cargo test -p hg --bins llm_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn llm_live() {
+        let cfg = BotCfg { llm_url: std::env::var("HG_LLM_URL").unwrap(), llm_model: std::env::var("HG_LLM_MODEL").unwrap_or_default(), llm_key: std::env::var("HG_LLM_KEY").unwrap_or_default(), ..Default::default() };
+        let b = Bot::made(&cfg, 1);
+        let around = format!("What you really see around you right now: monsters: {} x3, {} x1; other players: Krroks (level 40, Aresden). You are at 90% health, a Elvine citizen. Mention only what is listed here and never invent monsters, enemies, places or events (aresden and elvine are cities, not creatures). Monsters are listed as \"Spanish name (game name)\": when you write Spanish use the Spanish name, as it is written, and never translate or shorten it yourself. ", monster_name("Scorpion"), monster_name("Giant-Ant"));
+        let sys = llm_system(&b, 23, "elvine", &Mem { met: 2, ..Default::default() }, unix_ms(), &(llm_lang_hint(Some(false)).to_string() + &around));
+        let said = llm_ask(&cfg, &sys, &std::env::var("HG_LLM_SAY").unwrap_or("Krroks: hola, que tal vas? que estabas matando?".into())).expect("no answer");
+        println!("{said:?} -> {:?} tone {:?} action {:?} note {:?}", chat_line(&said), llm_tone(&said), llm_action(&said), llm_note(&said));
+        assert!(!chat_line(&said).is_empty());
+    }
+
+    #[test]
+    fn llm_keys_keep_the_scheme_of_the_url() {
+        let (c, w) = BotCfg::parse("llm-url = https://host.example/  // the model\nllm-model = m1\nllm-timeout-ms = 5000\n// llm-url = nope\nbot-count = 3 // three");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!((c.llm_url.as_str(), c.llm_model.as_str(), c.llm_ms, c.count), ("https://host.example", "m1", 5000, 3));
+        assert!(BotCfg::parse(CFG_SAMPLE).0.llm_url.is_empty(), "off by default");
+        // the API key: read from the config, only plain characters, and given to curl through its stdin, not its arguments
+        assert_eq!(BotCfg::parse("llm-key = test_key-1.2").0.llm_key, "test_key-1.2");
+        let (c, w) = BotCfg::parse("llm-key = bad\"key");
+        assert!(c.llm_key.is_empty() && w.len() == 1, "{w:?}");
+        assert_eq!(
+            curl_config("https://h/v1/chat/completions", "k_1", "{\"a\":\"x\\ny\"}"),
+            "url = \"https://h/v1/chat/completions\"\nheader = \"Content-Type: application/json\"\nheader = \"Authorization: Bearer k_1\"\ndata = \"{\\\"a\\\":\\\"x\\\\ny\\\"}\"\n"
+        );
+        assert!(!curl_config("https://h", "", "{}").contains("Authorization"), "no key, no header");
+    }
+
+    #[test]
     fn aggression_is_spread_from_never_to_always() {
         let cfg = BotCfg::default();
         let a: Vec<u8> = (1..=50).map(|i| Bot::made(&cfg, i).aggro).collect();
@@ -4577,9 +5426,11 @@ mod tests {
             assert!(fb > 0, "a neutral or warm opening is liked: {fb}");
         }
         assert_eq!(g.bots.list[2].aff_to("Bot01"), chemistry("Bot03", "Bot01"), "the far bot heard nothing");
-        // a line nobody was waiting for is not answered
-        g.bots_hear(1, 2, 0, &frame("hola Bot02"));
+        // a line nobody was waiting for, that does not call it by name, is not answered; one that does (even a shortening) is
+        g.bots_hear(1, 2, 0, &frame("hola a todos"));
         assert!(g.bots.chat_q.is_empty());
+        g.bots_hear(1, 2, 0, &frame("hola Bot02"));
+        assert_eq!(g.bots.chat_q.len(), 1, "called by name: it answers");
     }
 
     #[test]
@@ -5359,5 +6210,248 @@ bot-login-address = 127.0.0.1:4000
         assert_eq!(g.bot_assist(9, 0, (40, 40), 8, &[]), None, "too far from the monster");
         g.clients[9].as_mut().unwrap().party_id = 0;
         assert_eq!(g.bot_assist(9, 0, (70, 75), 8, &[]), None, "not in a party");
+    }
+
+    #[test]
+    fn a_shortened_name_calls_the_bot_only_when_it_is_unambiguous() {
+        let cfg = BotCfg { names: ["Zampabollo", "Zampon", "Pelayo", "Quesito"].iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        assert!(names_me(&cfg, "oye zampa, vas por aresdend1?", "Zampabollo"), "Zampa is Zampabollo (not Zampon)");
+        assert!(!names_me(&cfg, "oye zamp, vas?", "Zampabollo"), "Zamp could be either");
+        assert!(names_me(&cfg, "ZAMPABOLLO ven", "Zampabollo") && names_me(&cfg, "mira si no te has vuelto loco pel", "Pelayo"));
+        assert!(!names_me(&cfg, "que tal", "Quesito"), "a three-letter word of the stop list is not a call");
+        assert!(!names_me(&cfg, "hola a todos", "Pelayo"));
+        assert_eq!((llm_action("ok\nTONE: warm\nACTION: Party"), llm_action("ok\nACTION: none"), llm_action("ok\nACTION: dance"), llm_action("ok")), (Some(Act::Party), None, None, None));
+        assert_eq!(chat_line("va, voy contigo ACTION: follow"), "va, voy contigo");
+    }
+
+    #[test]
+    fn a_bot_calls_and_a_third_one_named_in_the_line_joins_the_talk() {
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        let cfg = BotCfg { count: 3, names: ["Pulpo", "Zampabollo", "Magdalena"].iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        g.bots = Bots::new(cfg.clone());
+        for (h, n) in [(1, "Pulpo"), (2, "Zampabollo"), (3, "Magdalena")] {
+            add(&mut g, h, n, ARESDEN, 0, (40 + h as i16, 40));
+        }
+        g.bot_hears_bot("Pulpo", 1, "ey tu, que tal?", "default", 20);
+        assert!(g.bots.talks.is_empty() && g.bots.chat_q.is_empty(), "not called by name: nobody answers");
+        g.bot_hears_bot("Pulpo", 1, "ey zampa, que tal?", "default", 20);
+        assert_eq!((g.bots.talks.len(), g.bots.chat_q.len()), (1, 1), "called by a shortening: it answers");
+        assert_eq!((g.bots.talks[0].a, g.bots.talks[0].b, g.bots.chat_q[0].0), (0, 1, 1));
+    }
+
+    #[test]
+    fn what_the_bot_really_sees_is_told_to_the_model() {
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        let cfg = BotCfg { count: 3, ..Default::default() };
+        g.bots = Bots::new(cfg.clone());
+        add(&mut g, 1, "Bot01", ELVINE, 0, (40, 40));
+        add(&mut g, 2, "Bot02", ARESDEN, 0, (45, 40));
+        add(&mut g, 3, "Far", ARESDEN, 0, (90, 90));
+        for i in [7, 8] {
+            g.npcs[i] = Some(Npc { map_index: 0, x: 44, y: 41, side: SIDE_HOSTILE, hp: 10, npc_name: b"Slime".to_vec(), ..Default::default() });
+        }
+        g.npcs[9] = Some(Npc { map_index: 0, x: 90, y: 41, side: SIDE_HOSTILE, hp: 10, npc_name: b"Orc".to_vec(), ..Default::default() });
+        let mut b = Bot::made(&cfg, 1);
+        let s = g.bot_around(1, &b);
+        assert!(s.contains("babosa (Slime) x2") && !s.contains("Orc") && s.contains("Bot02 (level 20, Aresden)") && !s.contains("Far") && s.contains("100% health, a Elvine citizen"), "{s}");
+        assert!(!s.contains("last monster"));
+        (b.last_prey, b.kills) = ("Goblin".into(), 4);
+        assert!(g.bot_around(1, &b).contains("last monster you killed was a Goblin (4 kills"));
+    }
+
+    #[test]
+    fn what_a_talk_commits_the_bot_to_is_checked_and_done() {
+        let (mut g, _rx) = world(vec![open_map(b"default"), open_map(b"other")]);
+        let cfg = BotCfg { count: 3, ..Default::default() };
+        g.bots = Bots::new(cfg.clone());
+        g.maps[0].is_attack_enabled = true;
+        add(&mut g, 1, "Bot01", ARESDEN, 0, (40, 40));
+        add(&mut g, 2, "Bot02", ARESDEN, 0, (42, 40));
+        add(&mut g, 3, "Rival", ELVINE, 0, (45, 40));
+        add(&mut g, 6, "Far1", ARESDEN, 1, (10, 10));
+        add(&mut g, 7, "Far2", ARESDEN, 1, (12, 10));
+        let hp = (g.clients[1].as_ref().unwrap().hp, g.clients[1].as_ref().unwrap().get_max_hp());
+        let now = 100_000;
+        let act = |g: &mut Game, a: Act, who: &str, setup: &dyn Fn(&mut Bot)| {
+            let mut b = Bot::made(&cfg, 1);
+            (b.mode, b.aggro, b.act) = (Mode::Hunt, 100, Some((a, who.to_string(), now + 25_000)));
+            setup(&mut b);
+            g.bot_act(1, &mut b, &cfg, ((40, 40), 0), hp, now);
+            b
+        };
+        let none = |_: &mut Bot| {};
+        // a party: the invitation is set for bot_party to send
+        let b = act(&mut g, Act::Party, "Bot02", &none);
+        assert_eq!((b.invite.clone().map(|i| i.0), b.act.is_none(), b.last_act), (Some("Bot02".to_string()), true, now));
+        assert!(g.bots.peace.iter().any(|p| p.0 == "Bot02"), "the invited one puts its weapons away");
+        // the cool-down of the same bot
+        let b = act(&mut g, Act::Follow, "Rival", &|b: &mut Bot| b.last_act = now - 5000);
+        assert_eq!((b.mode, b.last_act), (Mode::Hunt, now - 5000), "30 s between two actions");
+        // follow a rival (no party possible: other side) walks to it
+        let b = act(&mut g, Act::Follow, "Rival", &none);
+        assert_eq!((b.mode, b.home), (Mode::Travel, Some((0, (45, 40)))));
+        // fight: only a rival citizen, and not a peaceful bot
+        let b = act(&mut g, Act::Fight, "Bot02", &none);
+        assert_eq!(b.mode, Mode::Hunt, "a bot of its own side is not fought");
+        let b = act(&mut g, Act::Fight, "Rival", &|b: &mut Bot| b.aggro = 0);
+        assert_eq!(b.mode, Mode::Hunt, "a peaceful bot does not");
+        let b = act(&mut g, Act::Fight, "Rival", &none);
+        assert_eq!((b.mode, b.raid_target), (Mode::Defend, 3));
+        // gold: to a bot within 3 tiles, never to a player
+        g.clients[1].as_mut().unwrap().items[0] = Some(item(b"Gold", 5000));
+        g.clients[3].as_mut().unwrap().side = ARESDEN;
+        let b = act(&mut g, Act::Give, "Rival", &none);
+        assert!(g.queue.is_empty() && b.last_gift == 0, "a player gets nothing");
+        let b = act(&mut g, Act::Give, "Bot02", &none);
+        assert_eq!(queued(&g).iter().map(|q| (q.0, q.1)).collect::<Vec<_>>(), vec![(MSGID_COMMAND_COMMON, COMMONTYPE_GIVEITEMTOCHAR as u16)]);
+        assert_eq!(b.last_gift, now);
+        // look for people: the other map has two characters, this one none besides the others near
+        g.clients[2] = None;
+        g.clients[3] = None;
+        let b = act(&mut g, Act::Find, "", &none);
+        assert_eq!((b.mode, b.home), (Mode::Travel, Some((1, (10, 10)))));
+        // too late: dropped
+        let mut b = Bot::made(&cfg, 1);
+        (b.mode, b.act) = (Mode::Hunt, Some((Act::Find, String::new(), now - 1)));
+        g.bot_act(1, &mut b, &cfg, ((40, 40), 0), hp, now);
+        assert!(b.act.is_none() && b.mode == Mode::Hunt);
+    }
+
+    #[test]
+    fn the_bots_sound_different_know_their_state_and_a_party_invitation_waits_for_the_hunt() {
+        let cfg = BotCfg { count: 12, ..Default::default() };
+        let styles: std::collections::HashSet<String> = (1..=12).map(|i| llm_persona(&Bot::made(&cfg, i))).collect();
+        assert!(styles.len() >= 8, "twelve bots, {} different characters", styles.len());
+        assert_eq!(llm_action("hasta luego\nACTION: leave"), Some(Act::Leave));
+        assert_eq!(BotCfg::parse("llm-parallel = 6").0.llm_parallel, 6);
+        assert_eq!((BotCfg::default().llm_for_bots(), BotCfg { llm_parallel: 1, ..Default::default() }.llm_for_bots()), (3, 1));
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        g.bots = Bots::new(cfg.clone());
+        add(&mut g, 1, "Bot01", ARESDEN, 0, (40, 40));
+        add(&mut g, 2, "Bot02", ARESDEN, 0, (42, 40));
+        g.clients[1].as_mut().unwrap().items[0] = Some(item(b"Gold", 1234));
+        g.bots.chat_log.push_back(ChatLine { t: 0, map: "default".into(), from: "Bot02".into(), to: String::new(), text: "veo 19 scorpions".into(), bot: true });
+        g.bots.chat_log.push_back(ChatLine { t: 0, map: "elsewhere".into(), from: "Far".into(), to: String::new(), text: "otra cosa".into(), bot: true });
+        let s = g.bot_around(1, &g.bots.list[0]);
+        assert!(s.contains("carry 1234 gold") && s.contains("guild: none") && s.contains("not in a party") && s.contains("Bot02: veo 19 scorpions") && !s.contains("otra cosa") && s.contains("topic idea"), "{s}");
+        // a party invitation set while it is not hunting waits (and is kept) until it hunts; "leave" with nowhere to go is rejected
+        let hp = (g.clients[1].as_ref().unwrap().hp, g.clients[1].as_ref().unwrap().get_max_hp());
+        let mut b = Bot::made(&cfg, 1);
+        (b.mode, b.act) = (Mode::Travel, Some((Act::Party, "Bot02".to_string(), 150_000)));
+        g.bot_act(1, &mut b, &cfg, ((40, 40), 0), hp, 100_000);
+        assert!(b.act.is_some() && b.invite.is_none(), "still waiting");
+        b.mode = Mode::Hunt;
+        g.bot_act(1, &mut b, &cfg, ((40, 40), 0), hp, 101_000);
+        assert!(b.act.is_none() && b.invite.is_some(), "invited once it hunts");
+        let mut b = Bot::made(&cfg, 1);
+        (b.mode, b.act) = (Mode::Hunt, Some((Act::Leave, String::new(), 150_000)));
+        g.bot_act(1, &mut b, &cfg, ((40, 40), 0), hp, 100_000);
+        assert!(b.act.is_none() && b.mode == Mode::Hunt && b.last_act == 0, "no other map with monsters: nothing happens");
+    }
+
+    #[test]
+    fn monsters_have_spanish_names_and_the_prompt_forbids_latin_american_slang() {
+        assert_eq!((monster_name("Scorpion"), monster_name("giant-ant"), monster_name("Goblin")), ("escorpion (Scorpion)".to_string(), "hormiga gigante (Giant-Ant)".to_string(), "Goblin".to_string()));
+        let s = llm_system(&Bot::made(&BotCfg::default(), 1), 10, "aresden", &Mem::default(), 0, "");
+        assert!(s.contains("Castilian Spanish of Spain") && s.contains("Helbreath player slang") && s.contains("ni modo") && s.contains("holi") && s.contains("never in the past") && s.contains("fish (you go fishing"), "{s}");
+        assert_eq!((llm_action("voy a pescar\nACTION: fish"), llm_action("ACTION: find")), (Some(Act::Fish), Some(Act::Find)));
+    }
+
+    #[test]
+    fn an_llm_fish_action_sends_an_angler_fishing_and_nobody_else() {
+        let mut sea = open_map(b"default");
+        for x in 70..80 {
+            for y in 70..80 {
+                sea.tile_mut(x, y).unwrap().water = true;
+            }
+        }
+        let (mut g, _rx) = world(vec![sea]);
+        g.maps[0].is_attack_enabled = true;
+        g.data.skills.resize(8, None);
+        g.data.skills[5] = Some(crate::gamedata::SkillCfg { name: b"Fishing".to_vec(), type_: SKILLEFFECTTYPE_GET, value: [2, 1, 0, 0, 0, 0] });
+        add(&mut g, 1, "Bot03", ARESDEN, 0, (66, 75));
+        let mut fish = item(b"Fish", 1);
+        fish.cfg.id_num = 101;
+        assert!(g.create_fish(0, 74, 75, fish, 1, 0) != 0);
+        let cfg = BotCfg { count: 4, ..Default::default() };
+        let hp = (g.clients[1].as_ref().unwrap().hp, g.clients[1].as_ref().unwrap().get_max_hp());
+        let now = 100_000;
+        let go = |g: &mut Game, hobby: u8| {
+            let mut b = Bot::made(&cfg, 3);
+            (b.mode, b.hobby, b.act) = (Mode::Hunt, hobby, Some((Act::Fish, String::new(), now + 60_000)));
+            g.bot_act(1, &mut b, &cfg, ((66, 75), 0), hp, now);
+            b
+        };
+        assert_eq!(go(&mut g, 0).mode, Mode::Hunt, "not an angler");
+        assert_eq!(go(&mut g, 1).mode, Mode::Hunt, "an angler with no rod");
+        {
+            let c = g.clients[1].as_mut().unwrap();
+            let mut rod = item(b"FishingRod", 1);
+            (rod.cfg.item_type, rod.cfg.related_skill, rod.max_life_span, rod.cur_life_span) = (crate::item_use::ITEMTYPE_USE_SKILL, crate::combat::SKILL_FISHING, 200, 200);
+            c.items[0] = Some(rod);
+            c.skill_mastery[crate::combat::SKILL_FISHING as usize] = 100;
+        }
+        let b = go(&mut g, 1);
+        assert_eq!((b.mode, b.fish_map, b.last_act), (Mode::Fish, 0, now), "rod, skill and a fish: it goes now");
+    }
+
+    #[test]
+    fn the_models_action_is_kept_only_with_a_line_still_waiting() {
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        g.bots = Bots::new(BotCfg { count: 2, ..Default::default() });
+        g.bots_llm_said(0, None, "Bot02".into(), "va, voy".into(), Some(2), Some(Act::Follow), None);
+        assert!(g.bots.list[0].act.is_none(), "no line waiting (it logged off): no action");
+        g.bots.chat_q.push((0, None, "canned".into(), 0));
+        g.bots_llm_said(0, None, "Bot02".into(), "va, voy".into(), Some(2), Some(Act::Follow), Some("Bot02 caza escorpiones".into()));
+        assert_eq!(g.bots.list[0].act.as_ref().map(|a| (a.0, a.1.as_str())), Some((Act::Follow, "Bot02")));
+        assert_eq!(g.bots.chat_q[0].2, "va, voy");
+        // its deduction went into its history
+        assert_eq!(g.bots.list[0].hist.iter().map(|h| (h.kind, h.other.as_str(), h.text.as_str())).collect::<Vec<_>>(), vec![(2, "Bot02", "Bot02 caza escorpiones")]);
+    }
+
+    #[test]
+    fn a_bot_keeps_its_history_sends_it_to_the_login_and_uses_it_as_context() {
+        let cfg = BotCfg { count: 2, ..Default::default() };
+        let mut b = Bot::made(&cfg, 1);
+        b.remember(0, "Pulpo", "Pulpo: hola\tque tal\n");
+        b.remember(0, "Other", "Other: no me toques");
+        b.remember(0, "Pulpo", "me: bien, y tu?");
+        b.remember(1, "Pulpo", "Follow with Pulpo: walks to where it is");
+        b.remember(2, "Pulpo", "es de aresden y amable");
+        b.remember(1, "", "reached level 30");
+        assert_eq!(b.hist[0].text, "Pulpo: hola que tal ", "tabs and line breaks become blanks");
+        // what goes to the Login and what comes back
+        let rows = hist_decode(hist_encode(&b.hist_new).as_bytes());
+        assert_eq!(rows, b.hist);
+        assert!(hist_decode(b"zz").is_empty() && hist_decode(&to_test_hex("1\t9\ta\tb\nx\t0\ta\tb\n")).is_empty(), "a bad kind or time is skipped");
+        // the context: the lines with this one, the conclusions and the actions; nothing about other talks
+        let s = b.history_hint("Pulpo");
+        assert!(s.contains("Pulpo: hola que tal") && s.contains("me: bien, y tu?") && !s.contains("no me toques") && s.contains("Pulpo: es de aresden y amable") && s.contains("reached level 30") && s.contains("ago"), "{s}");
+        assert_eq!(Bot::made(&cfg, 2).history_hint("Pulpo"), "", "nothing remembered: nothing said");
+        // the memory is capped
+        for i in 0..300 {
+            b.remember(0, "Pulpo", &format!("Pulpo: {i}"));
+        }
+        assert_eq!((b.hist.len(), b.hist_new.len(), b.hist.last().unwrap().text.as_str()), (HIST_RAM, 300, "Pulpo: 299"));
+        // the answer of the Login goes before what the bot has lived meanwhile, within the cap
+        let (mut g, _rx) = world(vec![open_map(b"default")]);
+        g.bots = Bots::new(cfg);
+        g.bots.list[0].remember(0, "New", "New: hi");
+        let old = vec![Hist { t: 1, kind: 0, other: "Pulpo".into(), text: "Pulpo: old".into() }, Hist { t: 2, kind: 2, other: "Pulpo".into(), text: "old deduction".into() }];
+        let mut frame = vec![0u8; 16];
+        frame[6..11].copy_from_slice(b"Bot01");
+        frame.extend_from_slice(hist_encode(&old).as_bytes());
+        g.bots_history_loaded(&frame);
+        let b = &g.bots.list[0];
+        assert_eq!((b.hist_synced, b.hist.iter().map(|h| h.text.as_str()).collect::<Vec<_>>()), (true, vec!["Pulpo: old", "old deduction", "New: hi"]));
+        assert_eq!(b.hist_new.len(), 1, "only the new row still has to be sent");
+        assert_eq!((llm_note("hola\nTONE: warm\nACTION: none\nNOTE: Pulpo es de Elvine"), llm_note("x\nNOTE: none"), llm_note("x")), (Some("Pulpo es de Elvine".to_string()), None, None));
+        assert_eq!(chat_line("hola NOTE: algo"), "hola");
+        assert_eq!(ago(0, 90_000), "1 min");
+        assert_eq!(ago(0, 3 * 3_600_000), "3 h");
+    }
+
+    fn to_test_hex(s: &str) -> Vec<u8> {
+        s.bytes().flat_map(|b| format!("{b:02x}").into_bytes()).collect()
     }
 }
