@@ -741,6 +741,7 @@ impl Game {
             MSGID_REQUEST_GROUNDITEMNAMES => self.request_ground_item_names(h, d),
             MSGID_REQUEST_TYPING => self.request_typing(h, d),
             MSGID_REQUEST_CLIENTFLAGS => self.request_client_flags(h, d),
+            MSGID_REQUEST_SAVECLIENTSETTINGS => self.request_save_client_settings(h, d),
             MSGID_REQUEST_DKITEM => self.get_dk_item(h, d),
             MSGID_STATECHANGEPOINT => self.state_change(h, d),
             MSGID_REQUEST_LGNPTS => self.request_legion_pts(h),
@@ -980,6 +981,7 @@ impl Game {
         let r = Rd::new(d);
         let (id, ty) = (r.u32(0), r.u16(4));
         match id {
+            MSGID_RESPONSE_CLIENTSETTINGS => self.login_client_settings(d),
             MSGID_RESPONSE_REGISTERGAMESERVER => {
                 if ty == MSGTYPE_CONFIRM as u16 {
                     self.gsid = r.u8(6) as u16;

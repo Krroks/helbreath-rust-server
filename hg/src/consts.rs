@@ -428,6 +428,11 @@ pub const MSGID_RESPONSE_GROUNDITEMNAMES: u32 = 0x27b314e4;
 pub const MSGID_REQUEST_TYPING: u32 = 0x27b314e5;
 pub const MSGID_EVENT_TYPING: u32 = 0x27b314e8;
 pub const MSGID_REQUEST_CLIENTFLAGS: u32 = 0x27b314ea;
+// client settings kept in the database (client_settings.rs; client <-> HG also in Shared/NetMessages.h, HG <-> Login in login/msg.rs)
+pub const MSGID_REQUEST_SAVECLIENTSETTINGS: u32 = 0x27b314ec;
+pub const MSGID_NOTIFY_CLIENTSETTINGS: u32 = 0x27b314ee;
+pub const MSGID_CLIENTSETTINGS_SAVE: u32 = 0x0fc9423d;
+pub const MSGID_RESPONSE_CLIENTSETTINGS: u32 = 0x0fc9423e;
 pub const MSGID_REQUEST_RESTART: u32 = 0x28010ef1;
 pub const MSGID_RESPONSE_REGISTER_WORLDSERVERSOCKET: u32 = 0x280120a3;
 pub const MSGID_REQUEST_BLOCKACCOUNT: u32 = 0x2900ad13;

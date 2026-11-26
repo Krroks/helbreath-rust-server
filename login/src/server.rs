@@ -1133,6 +1133,9 @@ impl Server {
         if db.qs(&sql).await.is_none() {
             return;
         }
+        if client_settings_table(db).await {
+            db.qs(&format!("DELETE FROM `client_settings` WHERE `char_name` = '{gc}';")).await; // a new character of the same name starts clean
+        }
         if db.qs(&format!("DELETE FROM `skill` WHERE `CharID` = '{char_id}';")).await.is_none() {
             return;
         }
@@ -1646,6 +1649,7 @@ impl Server {
             MSGID_BOTMEM_SAVE => save_bot_memory(d.at(6), db).await,
             MSGID_REQUEST_BOTHIST => self.request_bot_history(d.at(6), sock, db).await,
             MSGID_BOTHIST_SAVE => save_bot_history(d.at(6), db).await,
+            MSGID_CLIENTSETTINGS_SAVE => save_client_settings(d.at(6), db).await,
             _ => {}
         }
     }
@@ -1737,6 +1741,25 @@ impl Server {
         };
         W(&mut b).u16(4, code);
         self.send_msg_to_gs(sock, &b[..16 + info_size]);
+        if code == LOGRESMSGTYPE_CONFIRM {
+            self.send_client_settings(&ch, sock, db).await; // after the player data: HG knows the character by then
+        }
+    }
+
+    /// The saved client settings of `ch` to its game server, empty when there are none. Nothing at all when the query fails: the
+    /// client then does not save, so it cannot overwrite what it never got.
+    async fn send_client_settings(&mut self, ch: &[u8], sock: usize, db: &mut Db) {
+        if !client_settings_table(db).await {
+            return;
+        }
+        let Some(r) = db.qs(&format!("SELECT `data` FROM `client_settings` WHERE `char_name` = '{}' LIMIT 1;", good(ch))).await else { return };
+        let data = if r.rows.len() == 1 { r.get(0, 0).to_vec() } else { Vec::new() };
+        let mut b = vec![0u8; 16 + data.len() + 1];
+        W(&mut b).u32(0, MSGID_RESPONSE_CLIENTSETTINGS);
+        W(&mut b).u16(4, LOGRESMSGTYPE_CONFIRM);
+        W(&mut b).bytes(6, &ch[..ch.len().min(10)]);
+        W(&mut b).bytes(16, &data);
+        self.send_msg_to_gs(sock, &b);
     }
 
     async fn guild_exists(&mut self, guild: &[u8], db: &mut Db) -> Option<u32> {
@@ -2542,6 +2565,35 @@ async fn bot_history_table(db: &mut Db) -> bool {
     BOTHIST_TABLE.load(Relaxed) == 1
 }
 
+/// 0 not tried, 1 the `client_settings` table is there, 2 it could not be made (as `BOTMEM_TABLE`).
+static SETTINGS_TABLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Makes the table of the clients' settings the first time it is needed.
+async fn client_settings_table(db: &mut Db) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if SETTINGS_TABLE.load(Relaxed) == 0 {
+        let ok = db.qs("CREATE TABLE IF NOT EXISTS `client_settings` (`char_name` varchar(10) NOT NULL, `data` text NOT NULL, `updated` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`char_name`)) ENGINE=InnoDB;").await.is_some();
+        SETTINGS_TABLE.store(if ok { 1 } else { 2 }, Relaxed);
+    }
+    SETTINGS_TABLE.load(Relaxed) == 1
+}
+
+/// The query that saves `hex` for `ch`; None unless `hex` is nothing but hex digits (it goes into the query as it is) and fits.
+fn client_settings_sql(ch: &[u8], hex: &[u8]) -> Option<String> {
+    if ch.is_empty() || hex.len() > 4000 || !hex.iter().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("REPLACE INTO `client_settings` (`char_name`, `data`) VALUES ('{}', '{}');", good(ch), s(hex)))
+}
+
+/// `d`: the character's name (10 bytes) and its settings as hex digits.
+async fn save_client_settings(d: Rd<'_>, db: &mut Db) {
+    let Some(sql) = client_settings_sql(&d.s(0, 10), &d.s(10, 4001)) else { return };
+    if client_settings_table(db).await {
+        db.qs(&sql).await;
+    }
+}
+
 fn to_hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -2600,6 +2652,7 @@ fn is_db_msg(m: u32) -> bool {
             | MSGID_BOTMEM_SAVE
             | MSGID_REQUEST_BOTHIST
             | MSGID_BOTHIST_SAVE
+            | MSGID_CLIENTSETTINGS_SAVE
     )
 }
 
@@ -2748,6 +2801,15 @@ mod tests {
         for k in 0..10 {
             assert!(!g.fail(k * (FAIL_WINDOW_MS + 1)));
         }
+    }
+
+    #[test]
+    fn client_settings_query_takes_hex_only() {
+        let q = client_settings_sql(b"Neo", b"613d310a").unwrap();
+        assert!(q.starts_with("REPLACE INTO `client_settings`") && q.contains("('Neo', '613d310a')"), "{q}");
+        assert!(client_settings_sql(b"Neo", b"").is_some());
+        assert!(client_settings_sql(b"Neo", b"'); DROP TABLE x; --").is_none());
+        assert!(client_settings_sql(b"", b"00").is_none() && client_settings_sql(b"Neo", &[b'a'; 4001]).is_none());
     }
 
     #[test]

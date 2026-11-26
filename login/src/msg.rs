@@ -43,6 +43,9 @@ pub const MSGID_RESPONSE_BOTMEM: u32 = 0x0FC94232 + M4;
 pub const MSGID_REQUEST_BOTHIST: u32 = 0x0FC94233 + M4;
 pub const MSGID_BOTHIST_SAVE: u32 = 0x0FC94234 + M4;
 pub const MSGID_RESPONSE_BOTHIST: u32 = 0x0FC94235 + M4;
+/// Rust only: the client settings of a character (table client_settings), HG -> Login and back
+pub const MSGID_CLIENTSETTINGS_SAVE: u32 = 0x0FC94236 + M4;
+pub const MSGID_RESPONSE_CLIENTSETTINGS: u32 = 0x0FC94237 + M4;
 
 pub const MSGID_ITEMCONFIGURATIONCONTENTS: u32 = 0x0FA314D9 + M4;
 pub const MSGID_NPCCONFIGURATIONCONTENTS: u32 = 0x0FA314DA + M4;

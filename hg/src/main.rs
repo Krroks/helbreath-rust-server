@@ -15,6 +15,7 @@ mod util;
 mod bots;
 mod bots_web;
 mod chat;
+mod client_settings;
 mod combat;
 mod delay;
 mod drops;

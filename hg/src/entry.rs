@@ -322,6 +322,7 @@ impl Game {
         self.send_enter_game_confirm(h);
         self.event_enter(h);
         self.party_enter(h);
+        self.send_client_settings(h);
 
         self.send_character_contents(h);
         let hs = self.client(h).unwrap().hunger_status;

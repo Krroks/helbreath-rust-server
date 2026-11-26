@@ -225,6 +225,19 @@ client has and the 3.82-based one lacked. The original client never sends them, 
   cleared on leaving) and every 10 s in case the client had not yet heard of a member. NOTIFY_PARTY_COORDS is untouched and still
   feeds the minimap dots. Test: `the_party_frame_only_goes_to_clients_that_announced_it_and_only_what_changed` (party.rs).
 
+## Client settings kept in the database (Rust only, 2026-11-26, `client_settings.rs`)
+
+The browser build has no registry, so every reload forgot the volume, the F-key shortcuts and the toggles. The client keeps its settings by
+name (`ReadSettingsVar` / `WriteSettingsVar` fill a map; Windows still uses the registry too), now including `SoundVolume` and `MusicVolume`
+(never saved before) and the mute list (`M=name` lines). In the game it compares the text every 2 s and sends it when it changed
+(MSGID_REQUEST_SAVECLIENTSETTINGS 0x27B314E9 + 3, `[id][type][text]`, at most 2000 bytes). HG relays it as hex to the Login
+(MSGID_CLIENTSETTINGS_SAVE), which keeps one row per **character** in `client_settings` (it creates the table itself; also in Run_Me.sql;
+the row goes when the character is deleted). The Login sends it back right after the player data (MSGID_RESPONSE_CLIENTSETTINGS) and HG
+gives it to the client on entering (MSGID_NOTIFY_CLIENTSETTINGS 0x27B314EB + 3, `[id][type][u16 length][text]`). Saved values win over the
+page's; an empty row means "keep yours and save them". A client that never got the answer never saves. `/typing`, `/lowhealth` and
+`/itemnames` stay in the character record (above). The login screens keep the defaults (the settings arrive on entering the game). Tests:
+`client_settings::tests`, login `client_settings_query_takes_hex_only`. Needs the Login and HG restarted and the web client reloaded.
+
 ## Health page `/stats` (Rust only, `stats.rs`)
 
 Every 2 s the game loop (top of `on_timer`) builds a JSON snapshot into `bots_web::Shared::stats`; the same 127.0.0.1 listener as the bots page

@@ -213,6 +213,9 @@ pub struct Client {
     pub newbie_min: i32,
     /// `Game::now` of the last MSGID_REQUEST_TYPING accepted (a client may not flood its neighbours)
     pub typing_time: u32,
+    /// the saved client settings from the Login (None until it answers) and when the client last saved them (client_settings.rs)
+    pub client_settings: Option<Vec<u8>>,
+    pub settings_time: u32,
     /// v8.00 client toggles, effective values: UI_TYPING | UI_LOWHEALTH | UI_ITEMNAMES (saved in the top bits of `LeftPopTime`)
     pub ui_flags: u8,
     /// `Game::now` of the last minute taken off `newbie_min` (0 = not started)
@@ -395,6 +398,8 @@ impl Client {
             time_left_shutup: 0,
             newbie_min: 0,
             typing_time: 0,
+            client_settings: None,
+            settings_time: 0,
             ui_flags: crate::events::UI_DEFAULT,
             newbie_time: 0,
             time_left_rating: 0,
